@@ -18,35 +18,35 @@
     @keyframes cursorBlink{0%,100%{opacity:1}50%{opacity:0}}
 
     /* ═══════════════════════════════════════════
-       SEMI DESIGN SYSTEM — 4-layer elevation
-       Light & Dark mode via [theme-mode="dark"]
+       SEMI 设计系统 — 4 层立体层级
+       浅色 & 深色模式通过 [theme-mode="dark"] 切换
        ═══════════════════════════════════════════ */
     :root{
-      /* ── Surface layers (0=bottom, 3=top) ── */
+      /* ── 表面层级（0=最底，3=最顶） ── */
       --bg0:#f2f3f4;
       --bg1:#f8f9fa;
       --bg2:#ffffff;
       --bg3:#eff0f2;
       --bg-hover:rgba(0,0,0,0.04);
 
-      /* ── Borders ── */
+      /* ── 边框 ── */
       --border:rgba(14,14,15,0.1);
       --border2:rgba(14,14,15,0.16);
       --border-subtle:rgba(14,14,15,0.06);
 
-      /* ── Text ── */
+      /* ── 文本 ── */
       --text:rgba(14,14,15,1);
       --text2:rgba(14,14,15,0.65);
       --text3:rgba(14,14,15,0.35);
       --text-inverse:#ffffff;
 
-      /* ── Brand / Accent ── */
+      /* ── 品牌 / 强调色 ── */
       --accent:#5e6ad2;
       --accent-h:#4f5dbf;
       --accent-bg:rgba(94,106,210,0.08);
       --accent-border:rgba(94,106,210,0.2);
 
-      /* ── Status ── */
+      /* ── 状态 ── */
       --green:#26a641;
       --green-bg:rgba(38,166,65,0.08);
       --green-border:rgba(38,166,65,0.2);
@@ -59,7 +59,7 @@
       --blue:#2173df;
       --blue-bg:rgba(33,115,223,0.08);
 
-      /* ── Layout ── */
+      /* ── 布局 ── */
       --radius:8px;
       --radius-sm:5px;
       --radius-lg:12px;
@@ -68,12 +68,12 @@
       --shadow-lg:0 4px 16px rgba(0,0,0,0.08),0 8px 32px rgba(0,0,0,0.06);
       --sidebar-w:120px;
 
-      /* ── Typography ── */
+      /* ── 字体排版 ── */
       --font:-apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", "SF Pro Display", Helvetica, Arial, sans-serif;
       --font-mono:"SF Mono", "Cascadia Code", "Fira Code", Consolas, "Liberation Mono", monospace;
     }
 
-    /* ── Dark Mode ── */
+    /* ── 深色模式 ── */
     [theme-mode="dark"]{
       --bg0:#0f0f11;
       --bg1:#16161a;
@@ -140,10 +140,10 @@
     #loading.hide{opacity:0;pointer-events:none}
     .spinner{animation:spin .8s linear infinite;width:24px;height:24px}
 
-    /* ─── App Layout ─── */
+    /* ─── 应用布局 ─── */
     .app-layout{display:flex;height:100dvh;width:100vw}
 
-    /* ─── Sidebar Nav ─── */
+    /* ─── 侧边栏导航 ─── */
     .sidebar{width:var(--sidebar-w);background:var(--bg2);border-right:1px solid var(--border);
       display:flex;flex-direction:column;align-items:center;padding:12px 0;flex-shrink:0;z-index:10}
     .nav-items{display:flex;flex-direction:column;gap:4px;flex:1;width:100%;padding:0 8px}
@@ -156,15 +156,15 @@
     .nav-item svg{width:18px;height:18px;flex-shrink:0}
     .nav-label{font-size:13px;font-weight:500}
 
-    /* ─── Main Content ─── */
+    /* ─── 主内容区 ─── */
     .main{flex:1;overflow-y:auto;padding:20px 24px;min-width:0}
     .main-inner{max-width:900px;margin:0 auto}
 
-    /* ─── View panels ─── */
+    /* ─── 视图面板 ─── */
     .view{display:none}
     .view.active{display:block}
 
-    /* ─── Card (existing) ─── */
+    /* ─── 卡片（已有） ─── */
     .card{background:var(--bg2);border:1px solid var(--border-subtle);border-radius:var(--radius);
       margin-bottom:14px;box-shadow:var(--shadow);overflow:hidden}
     .card-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;
@@ -172,7 +172,7 @@
     .card-title{font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.03em;color:var(--text2)}
     .card-body{padding:18px}
 
-    /* ─── Badge ─── */
+    /* ─── 徽章 ─── */
     .badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:16px;
       font-size:12px;font-weight:500}
     .badge .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
@@ -182,7 +182,7 @@
     .badge-error{background:var(--red-bg);color:var(--red)}
     .badge-wait{background:var(--orange-bg);color:var(--orange)}
 
-    /* ─── Service cards ─── */
+    /* ─── 服务卡片 ─── */
     .svcs{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:auto auto;gap:12px;margin-bottom:16px}
     #cardSys{grid-row:span 2}
     .svc{background:var(--bg2);border:1px solid var(--border-subtle);border-radius:10px;padding:16px;position:relative;transition:box-shadow .3s;box-shadow:var(--shadow)}
@@ -204,7 +204,7 @@
     .svc-status.on{color:var(--green)}
     .svc-status.warn{color:var(--orange,#e67e22);font-size:10px}
 
-    /* ─── System Info ─── */
+    /* ─── 系统信息 ─── */
     .sysinfo{display:grid;grid-template-columns:1fr 1fr;gap:10px}
     .sysinfo:empty{display:none}
     .sys-row{display:flex;align-items:center;gap:8px;font-size:13px;padding:6px 10px;background:var(--bg2);border-radius:8px}
@@ -223,7 +223,7 @@
     .log-viewer-body{max-height:200px;overflow-y:auto;padding:8px 12px;font-family:"SF Mono","Cascadia Code",Consolas,monospace;font-size:11px;color:#c9d1d9;line-height:1.6;white-space:pre-wrap;word-break:break-all}
     .log-viewer-body:empty::before{content:"(空)"}
 
-    /* ─── Buttons ─── */
+    /* ─── 按钮 ─── */
     .btns{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
     .btn{display:inline-flex;align-items:center;gap:5px;padding:7px 16px;border-radius:7px;
       font-size:13px;font-weight:500;border:1px solid var(--border);cursor:pointer;
@@ -246,7 +246,7 @@
     .card-head .btn{padding:4px 12px;font-size:12px;flex-shrink:0;white-space:nowrap}
     .card-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
-    /* ─── Log box (terminal dark) ─── */
+    /* ─── 日志框（终端深色） ─── */
     .log-box{background:#1a1b23;border:1px solid #2a2b35;border-radius:8px;height:300px;
       overflow-y:auto;font-family:"SF Mono","Cascadia Code","Fira Code",Consolas,monospace;
       font-size:12px;line-height:1.8;padding:10px 14px;color:#c9d1d9}
@@ -265,7 +265,7 @@
       padding:6px 14px;background:#25262b;border-bottom:1px solid #2a2b35;
       border-radius:6px 6px 0 0;margin:-10px -14px 0;font-size:12px;color:#7ee787;font-weight:600;position:sticky;top:0}
     .log-lines .log-line{animation:none}
-    /* System info card */
+    /* 系统信息卡片 */
     .si-item{display:flex;gap:4px;font-size:11px;flex-shrink:0}
     .si-lbl{color:var(--text3)}
     .si-val{color:var(--text2)}
@@ -282,12 +282,12 @@
 
     .footer{text-align:center;padding:20px;color:var(--text3);font-size:12px}
 
-    /* ═══ Chat View — app style ═══ */
+    /* ═══ 对话视图 — App 风格 ═══ */
     #viewChat{position:fixed;top:0;left:var(--sidebar-w);right:0;height:100dvh;display:none;flex-direction:column;background:var(--bg0);z-index:20}
     #viewChat.active{display:flex}
     .chat-layout{display:flex;height:100%}
 
-    /* ── Sidebar (overlay, slides over content) ── */
+    /* ── 侧边栏（浮层，滑动覆盖内容） ── */
     .chat-sessions-overlay{
       position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.35);
       opacity:0;pointer-events:none;transition:opacity .2s;
@@ -414,18 +414,33 @@
     .thinking-indicator .thinking-dot:nth-child(2){animation-delay:.2s}
     .thinking-indicator .thinking-dot:nth-child(3){animation-delay:.4s}
     /* 工具执行状态徽章 */
-    .tool-progress-wrap{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px}
-    .tool-progress-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;
-      background:var(--bg3);border-radius:8px;font-size:12px;color:var(--text2);line-height:1.4;
-      border:1px solid var(--border);width:fit-content;white-space:nowrap}
-    .tool-progress-badge.tool-running{border-color:var(--accent);color:var(--accent)}
-    .tool-progress-badge.tool-completed{border-color:var(--green,#22c55e);color:var(--text3);opacity:.8}
-    .tool-progress-badge .tool-emoji{font-size:14px;flex-shrink:0}
+    .tool-progress-wrap{display:flex;flex-wrap:wrap;gap:4px}
+    .tool-progress-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;
+      background:var(--bg2);border-radius:12px;font-size:11px;color:var(--text3);line-height:1.3;
+      border:1px solid var(--border-subtle,var(--border));width:fit-content;white-space:nowrap;
+      transition:all .2s ease}
+    .tool-progress-badge.tool-running{background:color-mix(in srgb,var(--accent) 8%,transparent);
+      border-color:color-mix(in srgb,var(--accent) 30%,transparent);color:var(--accent)}
+    .tool-progress-badge.tool-completed{background:color-mix(in srgb,var(--green,#22c55e) 6%,transparent);
+      border-color:color-mix(in srgb,var(--green,#22c55e) 20%,transparent);color:var(--text3)}
+    .tool-progress-badge .tool-emoji{font-size:12px;flex-shrink:0}
     .tool-progress-badge .tool-label{white-space:nowrap}
-    .tool-progress-badge .tool-spinner{width:12px;height:12px;border:2px solid var(--border);
+    .tool-progress-badge .tool-spinner{width:10px;height:10px;border:1.5px solid color-mix(in srgb,var(--accent) 25%,transparent);
       border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0}
-    .tool-progress-badge .tool-check{color:var(--green,#22c55e);font-size:13px;flex-shrink:0}
+    .tool-progress-badge .tool-check{color:var(--green,#22c55e);font-size:11px;flex-shrink:0}
     @keyframes spin{to{transform:rotate(360deg)}}
+    /* 独立进度区域 */
+    .assistant-progress{display:none;background:transparent;border-radius:8px;
+      padding:4px 12px;margin:0 48px 4px 48px;font-size:11px;color:var(--text3)}
+    .assistant-progress .progress-title{display:none}
+    .assistant-progress .progress-body{display:flex;flex-wrap:wrap;gap:4px}
+    .assistant-progress.visible{display:flex;align-items:center;gap:6px}
+    .assistant-progress.done{opacity:.75}
+    /* 新窗口按钮 */
+    .chat-popout-btn{background:none;border:none;cursor:pointer;color:var(--text3);
+      padding:4px;border-radius:4px;display:none;align-items:center;flex-shrink:0}
+    .chat-popout-btn:hover{background:var(--bg3);color:var(--text)}
+    .chat-popout-btn svg{width:16px;height:16px}
     /* 工具授权按钮 */
     .tool-approve-bar{display:flex;gap:8px;margin-top:10px;padding-top:8px;border-top:1px dashed var(--border)}
     .tool-approve-btn{padding:6px 16px;border-radius:6px;font-size:13px;cursor:pointer;border:1px solid;
@@ -493,7 +508,7 @@
     .chat-msg-file{margin-top:6px;padding:6px 10px;background:var(--bg3);border-radius:8px;font-size:12px;color:var(--text2);display:inline-flex;align-items:center;gap:6px;max-width:280px;word-break:break-all}
     .chat-msg-file svg{flex-shrink:0;width:14px;height:14px}
 
-    /* ─── Inline link / QR widget inside chat messages ─── */
+    /* ─── 聊天消息内的行内链接 / 二维码组件 ─── */
     .msg-content a{color:var(--accent);text-decoration:underline;word-break:break-all}
     .msg-content a:hover{color:var(--accent-h)}
     .msg-qr-toggle{display:inline-flex;align-items:center;gap:4px;margin-left:4px;padding:1px 8px;
@@ -505,7 +520,7 @@
     .msg-qr-box.show{display:block}
     .msg-qr-box canvas{display:block}
 
-    /* ─── Dashboard Toggle ─── */
+    /* ─── Dashboard 开关 ─── */
     .dash-toggle-label{font-size:11px;color:var(--text3);white-space:nowrap;transition:color .2s}
     .dash-toggle-label.running{color:var(--green);font-weight:500}
     .toggle-switch{position:relative;width:38px;height:22px;cursor:pointer;flex-shrink:0}
@@ -516,10 +531,10 @@
     .toggle-switch input:checked~.toggle-knob{transform:translateX(16px)}
     .toggle-switch.disabled{opacity:.4;cursor:not-allowed}
 
-    /* ─── Overview Embedded Logs ─── */
+    /* ─── 概览页内嵌日志 ─── */
     .overview-log-box{height:300px;overflow-y:auto;padding:10px 14px;border-top:1px solid #2a2b35}
 
-    /* ═══ Settings View ═══ */
+    /* ═══ 设置视图 ═══ */
     .provider-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);
       padding:16px 16px 18px;margin-bottom:12px;display:flex;align-items:flex-start;justify-content:space-between;
       gap:12px;transition:border-color .15s;min-height:120px}
@@ -536,9 +551,9 @@
     .prov-actions{display:flex;flex-direction:column;gap:4px;flex-shrink:0;align-items:stretch}
     .prov-actions .btn-sm{min-width:60px;text-align:center;padding:8px 8px;font-size:12px;white-space:nowrap;min-height:36px}
 
-    /* ─── Preset Selector ─── */
+    /* ─── 预设选择器 ─── */
 
-    /* ─── API Key Input ─── */
+    /* ─── API Key 输入框 ─── */
     .key-input-wrap{position:relative;display:flex;align-items:center}
     .key-input-wrap input{padding-right:40px}
     .key-toggle-btn{position:absolute;right:8px;top:50%;transform:translateY(-50%);border:none;background:transparent;
@@ -548,10 +563,13 @@
     input[type="password"]::-ms-reveal,input[type="password"]::-ms-clear{display:none}
     input[type="password"]::-webkit-credentials-auto-fill-button{display:none}
 
-    /* ─── Provider Modal ─── */
+    /* ─── 服务商弹窗 ─── */
     .modal-overlay{position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,.4);
       z-index:100;display:none;align-items:center;justify-content:center}
     .modal-overlay.show{display:flex}
+    /* 添加模型弹窗靠上显示，避免下拉选项被视口底部遮挡 */
+    #providerModal{align-items:flex-start;padding-top:8vh}
+    #providerModal .modal{max-height:88vh;overflow-y:auto;overflow-x:visible}
     .modal{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);
       width:480px;max-width:90vw;max-height:90vh;overflow-y:auto;box-shadow:0 8px 30px rgba(0,0,0,.15)}
     .modal-head{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
@@ -589,7 +607,7 @@
     .modal-foot{padding:14px 20px;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:10px}
     .mobile-nav-items{display:none}
 
-    /* ─── Responsive ─── */
+    /* ─── 响应式 ─── */
     @media(max-width:600px){
       * { touch-action: manipulation; -ms-touch-action: manipulation; }
       input, textarea, select { font-size: 16px !important; }
@@ -628,15 +646,18 @@
       .prov-info{min-width:0;overflow:hidden}
       .prov-name{font-size:13px}
       .prov-actions{flex-direction:column;gap:4px}
-      /* Session drawer — float above mobile sidebar */
+      /* 会话抽屉 — 浮在移动端侧边栏之上 */
       .chat-sessions{z-index:99;padding-top:48px;box-sizing:border-box}
       .chat-sessions-overlay{z-index:98}
-      /* Mobile nav inside hamburger drawer */
+      /* 汉堡抽屉内的移动端导航 */
       .mobile-nav-items{display:flex;flex-direction:row;border-bottom:1px solid var(--border);padding:6px 8px;gap:4px;background:var(--bg2)}
       .mobile-nav-btn{flex:1;padding:8px 0;border:none;border-radius:6px;background:transparent;color:var(--text2);font-size:13px;cursor:pointer;text-align:center;transition:background .15s,color .15s}
       .mobile-nav-btn.active{background:var(--accent-bg);color:var(--accent);font-weight:600}
       .mobile-nav-btn:active{background:var(--bg3)}
-      /* Chat active: hide horizontal sidebar, expand chat fullscreen */
+      /* 添加模型弹窗：小屏减少顶部间距 */
+      #providerModal{padding-top:13vh}
+      #providerModal .modal{max-height:94vh}
+      /* 对话激活时：隐藏横向侧边栏，聊天全屏展开 */
       body:has(#viewChat.active) > .app-layout > .sidebar{display:none}
       #viewChat.active{top:0 !important;height:100dvh !important}
       #viewChat.active .chat-sessions{padding-top:0}
@@ -654,7 +675,7 @@
 </div>
 
 <div class="app-layout">
-  <!-- Sidebar Navigation -->
+  <!-- 侧边栏导航 -->
   <nav class="sidebar">
     <div class="nav-items">
       <button class="nav-item" data-view="overview" onclick="switchView('overview')">
@@ -676,10 +697,10 @@
     </div>
   </nav>
 
-  <!-- Main Content -->
+  <!-- 主内容区 -->
   <div class="main">
 
-    <!-- ═══ Overview View ═══ -->
+    <!-- ═══ 概览视图 ═══ -->
     <div class="view" id="viewOverview">
       <div class="main-inner">
         <div class="card">
@@ -755,7 +776,7 @@
           </div>
         </div>
 
-        <!-- Embedded Logs -->
+        <!-- 内嵌日志 -->
         <div class="card">
           <div class="card-head">
             <span class="card-title" id="logCardTitle">实时日志</span>
@@ -776,13 +797,17 @@
       </div>
     </div>
 
-    <!-- ═══ Settings View ═══ -->
+    <!-- ═══ 设置视图 ═══ -->
     <div class="view" id="viewSettings">
       <div class="main-inner">
-        <!-- 模型服务 Card -->
+        <!-- 模型服务卡片 -->
         <div class="card">
           <div class="card-head">
             <span class="card-title">模型服务</span>
+            <button class="btn" onclick="settingsAddLocalModel()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              添加本地模型
+            </button>
             <button class="btn" onclick="settingsAddProvider()">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
               添加模型服务
@@ -796,10 +821,10 @@
       </div>
     </div>
 
-    <!-- ═══ Update View ═══ -->
+    <!-- ═══ 更新视图 ═══ -->
     <div class="view" id="viewUpdate">
       <div class="main-inner">
-        <!-- Hermes 版本 Card -->
+        <!-- Hermes 版本卡片 -->
         <div class="card">
           <div class="card-head">
             <span class="card-title">Hermes Agent 版本</span>
@@ -830,20 +855,17 @@
           </div>
         </div>
 
-
-          <div class="card-head">
+        <!-- 关于 -->
+        <div class="card" style="background:none;border:none;border-top:1px solid var(--border);border-radius:0;box-shadow:none">
+          <div class="card-body" style="text-align:center">
+            <a href="https://github.com/iranee/fnos-hermes-agent" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">枫叶飘落</a>
           </div>
-          <div class="card-body">
-            <div style="text-align:center">
-              <a href="https://cheen.cn" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">枫叶飘落</a>
-            </div>
-          </div>
-
+        </div>
       </div>
     </div>
 
 
-    <!-- ═══ Chat View ═══ -->
+    <!-- ═══ 对话视图 ═══ -->
     <div class="view" id="viewChat">
       <div class="chat-sessions-overlay" id="chatOverlay" onclick="toggleChatSessions()"></div>
       <div class="chat-sessions" id="chatSessions">
@@ -868,6 +890,9 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
             </button>
             <span class="chat-header-title" id="chatHeaderTitle" onclick="chatRenameSession()"></span>
+            <button class="chat-popout-btn" id="chatPopoutBtn" title="在新窗口打开" onclick="chatOpenNewWindow()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            </button>
           </div>
           <div class="chat-messages" id="chatMessages">
             <button class="scroll-bottom-btn" id="scrollBottomBtn" onclick="scrollChatToBottom()" title="回到底部">
@@ -902,7 +927,7 @@
 
 
 
-<!-- Provider Modal (openclaw-style) -->
+<!-- 服务商弹窗（openclaw 风格）-->
 <div class="modal-overlay" id="providerModal">
   <div class="modal">
     <div class="modal-head">
@@ -943,7 +968,7 @@
           <select id="modelSelect" onchange="settingsOnModelSelectChange(this.value)"></select>
           <div id="modelCustomWrap" style="display:none;margin-top:6px">
             <input id="modelInput" placeholder="输入自定义模型名称..." style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text1)">
-            <div style="margin-top:4px"><a href="javascript:void(0)" onclick="settingsBackToModelList()" style="font-size:12px;color:var(--accent)">← 返回下拉列表选择</a></div>
+            <div id="modelBackToListWrap" style="margin-top:4px"><a href="javascript:void(0)" onclick="settingsBackToModelList()" style="font-size:12px;color:var(--accent)">← 返回下拉列表选择</a></div>
           </div>
         </div>
         <div class="form-row" id="paramsGroup">
@@ -1045,7 +1070,7 @@
       if(_drawer) _drawer.classList.remove('open');
       if(_overlay) _overlay.classList.remove('open');
     }
-    try { localStorage.setItem('hermes_view', view); } catch(e){}
+    if (window.__deepLinked) { window.__deepLinked = false; } else { try { localStorage.setItem('hermes_view', view); } catch(e){} }
     if(view === 'chat'){
       if(!wasActive){
         if(chatState.inited){
@@ -1069,7 +1094,7 @@
       logStreaming = false;
       document.getElementById('streamToggleInput').checked = false;
       updateStreamUI();
-      // Restore last viewed log file from memory
+      // 从本地存储恢复上次查看的日志文件
       var savedFile = null;
       try { savedFile = localStorage.getItem('hermes_log_file'); } catch(e){}
       if(savedFile){
@@ -1118,7 +1143,7 @@
   function refreshSysInfoDelayed(){ setTimeout(refreshSysInfo, 150); }
 
   // ═══════════════════════════════════════════════
-  // OVERVIEW VIEW
+  // 概览视图
   // ═══════════════════════════════════════════════
 
   function setStatus(cls, txt){
@@ -1150,7 +1175,7 @@
       var hermesVersionEl = document.getElementById('hermesVersion');
       if(hermesVersionEl) hermesVersionEl.textContent = (s.gateway && s.gateway.version) || '--';
 
-      // Gateway status text
+      // Gateway 状态文本
       var gwStatusEl = document.getElementById('gwStatus');
       var gwCrashLoop = s.gateway && s.gateway.crash_loop;
       if(gwStatusEl){
@@ -1159,11 +1184,11 @@
         else { gwStatusEl.textContent = '未启动'; gwStatusEl.className = 'svc-status off'; }
       }
 
-      btnStart.disabled   = !!(gw || db);   // disabled only when nothing running
-      btnStop.disabled    = (!gw && !db);   // disabled when both stopped
-      btnRestart.disabled = (!gw && !db);   // disabled when both stopped
+      btnStart.disabled   = !!(gw || db);   // 有服务运行时禁用
+      btnStop.disabled    = (!gw && !db);   // 两者都停止时禁用
+      btnRestart.disabled = (!gw && !db);   // 两者都停止时禁用
 
-      // Dashboard toggle — independent of gateway
+      // Dashboard 开关 — 独立于 Gateway
       var toggleInput = document.getElementById('dashToggleInput');
       var toggleLabel = document.getElementById('dashToggleLabel');
       var toggleSwitch = document.getElementById('dashToggle');
@@ -1210,7 +1235,7 @@
   // 启动前检查：需要至少一个可用 AI 服务商
   // Hermes Gateway 属于内部路由，有任意 provider 即可启动
   window.startCheckAndAct = function(){
-    setStatus('wait', '正在启动'); // Immediately show pending state
+    setStatus('wait', '正在启动'); // 立即显示等待中状态
     api('/api/config').then(function(cfg){
       var providers = cfg.providers || [];
       if(providers.length === 0){
@@ -1380,7 +1405,7 @@
   }
 
   // ═══════════════════════════════════════════════
-  // SYSTEM INFO
+  // 系统信息
   // ═══════════════════════════════════════════════
 
   function refreshSysInfo() {
@@ -1432,11 +1457,11 @@
     try { localStorage.setItem('hermes_log_file', name); } catch(e){}
     if(logFileInterval){ clearInterval(logFileInterval); logFileInterval = null; }
     if(es){ es.close(); es = null; }
-    // Update card title to show file name
+    // 更新卡片标题以显示文件名
     var title = document.getElementById('logCardTitle');
     if(title) title.textContent = name;
     updateStreamUI();
-    // Update button active state in system info card
+    // 更新系统信息卡片中按钮的激活状态
     var btns = document.querySelectorAll('#siLogBtns .si-file-btn');
     btns.forEach(function(b){ b.classList.remove('active'); });
     var activeBtn = document.querySelector('#siLogBtns .si-file-btn[onclick*="'+name+'"]');
@@ -1473,7 +1498,7 @@
   }
 
   // ═══════════════════════════════════════════════
-  // CHAT VIEW
+  // 对话视图
   // ═══════════════════════════════════════════════
 
   var chatState = {
@@ -1596,7 +1621,7 @@
       var btn = document.createElement('button');
       btn.className = 'code-copy-btn';
       btn.textContent = '复制';
-      btn.onmousedown = function(e){ e.preventDefault(); }; // keep keyboard open
+      btn.onmousedown = function(e){ e.preventDefault(); }; // 保持键盘不收起
       btn.onclick = function(){
         var code = pre.querySelector('code');
         var text = (code ? code.textContent : pre.textContent) || '';
@@ -1631,10 +1656,10 @@
       if(a.dataset.qrEnhanced) return;
       a.dataset.qrEnhanced = '1';
       var href = a.getAttribute('href');
-      // Only [qr](url) links get QR — link text must be exactly "qr"
+      // 仅 [qr](url) 形式的链接生成二维码 —— 链接文字必须正好是 "qr"
       var label = (a.textContent || '').trim().toLowerCase();
       if(label !== 'qr') return;
-      // Replace link text with the URL itself for readability
+      // 将链接文字替换为 URL 本身，便于阅读
       a.textContent = href;
 
       var toggle = document.createElement('span');
@@ -1867,6 +1892,8 @@
     var sess = chatState.sessions.find(function(s){ return s.id === chatState.currentId; });
     el.textContent = sess ? (sess.title || 'New Chat') : '';
     el.classList.remove('editing');
+    var popBtn = document.getElementById('chatPopoutBtn');
+    if(popBtn) popBtn.style.display = chatState.currentId ? 'flex' : 'none';
   }
 
   window.chatRenameSession = function(){
@@ -1905,6 +1932,12 @@
     });
     input.addEventListener('blur', save);
   }
+
+  window.chatOpenNewWindow = function(){
+    if(!chatState.currentId) return;
+    var url = window.location.pathname + '?view=chat&session_id=' + encodeURIComponent(chatState.currentId);
+    window.open(url, '_blank');
+  };
 
   function chatRenderEmpty(){
     document.getElementById('chatMessages').innerHTML =
@@ -2209,14 +2242,22 @@
       userDiv.innerHTML = '<div class="msg-role">你</div><div class="msg-content">'+escapeHtml(text).replace(/\n/g, '<br>')+imgThumbsHtml+(fileTagsHtml?'<div style="margin-top:6px">'+fileTagsHtml+'</div>':'')+'</div><div class="msg-time" data-full="'+nowFull+'">'+nowTime+'</div>';
       box.appendChild(userDiv);
 
-      // Assistant placeholder with "正在思考..."
+      // 独立进度容器（默认隐藏,有工具事件时显示）
+      var progressDiv = document.createElement('div');
+      progressDiv.className = 'assistant-progress';
+      progressDiv.innerHTML = '<div class="progress-body" id="streamingProgress"></div>';
+      box.appendChild(progressDiv);
+      var progressBodyEl = progressDiv.querySelector('.progress-body');
+      var hasToolEvents = false;
+      
+      // 助手占位气泡，显示"正在思考..."
       var asstDiv = document.createElement('div');
       asstDiv.className = 'message assistant anim-in';
       asstDiv.innerHTML = '<div class="msg-role">Hermes</div><div class="msg-content" id="streamingContent"><span class="thinking-indicator"><span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span></span></div><div class="msg-time" id="streamingTime"></div>';
       box.appendChild(asstDiv);
       var contentEl = asstDiv.querySelector('.msg-content');
       scrollChatToBottom(true);
-      // Show progress/timeout bar
+      // 显示进度/超时进度条
       var timeoutBar = document.getElementById('chatTimeoutBar');
       var timeoutFill = document.getElementById('chatTimeoutFill');
       var statusBar = document.getElementById('chatStatusBar');
@@ -2239,6 +2280,7 @@
       input.style.height = 'auto';
 
       var fullText = '';
+      var streamErrorMsg = ''; // 后端流式错误原文（非用户停止）
       var toolBadgesMap = new Map(); // toolCallId → {tool, toolZh, emoji, status}
 
       // 按工具名分组渲染，同类工具合并为一个徽章 + 计数
@@ -2278,11 +2320,16 @@
             emoji: tp.emoji || '🔧',
             status: tp.status,
           });
+          hasToolEvents = true;
 
-          // 重新渲染：徽章容器 + 已有文字
-          var rendered = fullText ? renderMarkdown(fullText, true) : '';
-          contentEl.innerHTML = getToolBadgesWrap() + rendered;
-          if (fullText) { addCopyButtonsToPre(contentEl); contentEl.classList.add('cursor-blink'); }
+          // 渲染工具徽章到独立进度区域
+          progressDiv.classList.add('visible');
+          progressBodyEl.innerHTML = getToolBadgesWrap();
+          // 回复气泡仅显示文字
+          if (fullText) {
+            contentEl.innerHTML = renderMarkdown(fullText, true);
+            addCopyButtonsToPre(contentEl); contentEl.classList.add('cursor-blink');
+          }
           if (statusBar) statusBar.textContent = tp.status === 'running'
             ? (tp.emoji || '🔧') + ' ' + (tp.toolZh || tp.tool) + '…'
             : 'Hermes 正在回复…';
@@ -2290,13 +2337,14 @@
         } else if (parsed.delta) {
           var wasEmpty = (fullText === '');
           fullText += parsed.delta;
-          contentEl.innerHTML = getToolBadgesWrap() + renderMarkdown(fullText, true);
+          contentEl.innerHTML = renderMarkdown(fullText, true);
           addCopyButtonsToPre(contentEl);
           if (wasEmpty) contentEl.classList.add('cursor-blink');
           if (statusBar) statusBar.textContent = 'Hermes 正在回复…';
           (window.requestAnimationFrame || setTimeout)(function(){ scrollChatToBottom(); }, 0);
         } else if (parsed.error) {
-          contentEl.innerHTML = '<span style="color:var(--red)">Error: '+escapeHtml(parsed.error)+'</span>';
+          streamErrorMsg = parsed.error;
+          contentEl.innerHTML = '<span style="color:var(--red);white-space:pre-wrap">⚠ 错误：'+escapeHtml(parsed.error)+'</span>';
         } else if (parsed.info) {
           if (statusBar) statusBar.textContent = parsed.info;
         }
@@ -2306,12 +2354,23 @@
       // ── 公共：流结束收尾 ──
       function onFinish(aborted) {
         contentEl.classList.remove('cursor-blink');
-        var badgesWrap = getToolBadgesWrap();
-        if (aborted) {
-          if (fullText) { contentEl.innerHTML = badgesWrap + renderMarkdown(fullText) + ' <em>(stopped)</em>'; enhanceLinksWithQR(contentEl); addCopyButtonsToPre(contentEl); }
+        // 进度容器最终状态
+        if (hasToolEvents) {
+          progressDiv.classList.add('visible', 'done');
+          progressBodyEl.innerHTML = getToolBadgesWrap();
         } else {
-          if (!fullText && !badgesWrap) contentEl.textContent = '（模型未返回有效内容）';
-          else { contentEl.innerHTML = badgesWrap + renderMarkdown(fullText); enhanceLinksWithQR(contentEl); addCopyButtonsToPre(contentEl); }
+          progressDiv.classList.remove('visible');
+        }
+        // 回复气泡不再混入徽章
+        if (streamErrorMsg) {
+          // 后端流式错误：保留完整原文，不被 abort/兜底 覆盖
+          contentEl.innerHTML = '<span style="color:var(--red);white-space:pre-wrap">⚠ 错误：'+escapeHtml(streamErrorMsg)+'</span>';
+        } else if (aborted) {
+          if (fullText) { contentEl.innerHTML = renderMarkdown(fullText) + ' <em>(stopped)</em>'; enhanceLinksWithQR(contentEl); addCopyButtonsToPre(contentEl); }
+          else { contentEl.textContent = hasToolEvents ? '' : '(stopped)'; }
+        } else {
+          if (!fullText && !hasToolEvents) contentEl.textContent = '（模型未返回有效内容）';
+          else { contentEl.innerHTML = renderMarkdown(fullText); enhanceLinksWithQR(contentEl); addCopyButtonsToPre(contentEl); }
         }
 
         // ── 工具授权检测：AI 请求批准时显示允许/拒绝按钮 ──
@@ -2443,6 +2502,8 @@
         ws.onmessage = function(ev) {
           try {
             var parsed = JSON.parse(ev.data);
+            // 收到任何合法消息即证明 WS 存活，取消降级定时器
+            clearTimeout(wsTimer);
             onMsg(parsed, function(isErr) {
               if (wsDone) return;
               wsDone = true;
@@ -2506,17 +2567,19 @@
   }
 
   // ═══════════════════════════════════════════════
-  // SETTINGS VIEW (openclaw-style)
+  // 设置视图（openclaw 风格）
   // ═══════════════════════════════════════════════
 
   var settingsState = {
-    config: { providers: [], active_provider: '', presets: [] },
+    config: { providers: [], active_provider: '', presets: [], provider_classes: {} },
     editingIndex: -1,
     selectedPreset: '',
     keyVisible: false,
+    loaded: false,
+    localMode: false,
   };
 
-  // Frontend preset fallback — 数据统一由后端 provider-config.js 管理
+  // 前端预设兜底 — 数据统一由后端 provider-config.js 管理
   // 通过 /api/config 接口获取 presets 和 provider_models
   var DEFAULT_PRESETS = [];
   var PROVIDER_MODELS = {};
@@ -2527,15 +2590,48 @@
       : DEFAULT_PRESETS;
   }
 
-  // ─── Model selector: 下拉列表 + 自定义输入（见 settingsPopulateModelSelect）───
+  // A 类内置商 base_url 只读（端点由 Hermes 内置 registry 管理），B 类/custom 可手动编辑。iranee
+  function settingsIsReadonlyBaseUrl(providerId){
+    var classes = (settingsState.config && settingsState.config.provider_classes) || {};
+    return classes[providerId] === 'A';
+  }
+
+  // 按 A/B 分类设置 base_url 输入框的可编辑性与提示（只读态置灰 + 说明）。iranee
+  function settingsApplyBaseUrlMode(providerId){
+    var input = document.getElementById('baseUrlInput');
+    if(!input) return;
+    var hint = document.getElementById('connectionDefaultUrl');
+    if(settingsIsReadonlyBaseUrl(providerId)){
+      input.readOnly = true;
+      input.style.opacity = '0.6';
+      input.style.cursor = 'not-allowed';
+      if(hint) hint.textContent = '内置商地址由 Hermes 管理，不可修改';
+    } else {
+      input.readOnly = false;
+      input.style.opacity = '';
+      input.style.cursor = '';
+    }
+  }
+
+  // ─── 模型选择器：下拉列表 + 自定义输入（见 settingsPopulateModelSelect）───
   function settingsLoad(){
-    api('/api/config').then(function(cfg){
+    return api('/api/config').then(function(cfg){
       settingsState.config = cfg;
       if (cfg.provider_models) PROVIDER_MODELS = cfg.provider_models;
+      settingsState.loaded = true;
       settingsRenderProviders();
+      return cfg;
     }).catch(function(err){
       console.error('settingsLoad failed:', err);
+      throw err;
     });
+  }
+
+  // 确保配置（presets / provider_models）已从后端加载后再执行回调，
+  // 避免首次打开"添加模型服务"时下拉列表为空的竞态问题。
+  function settingsEnsureLoaded(){
+    if (settingsState.loaded) return Promise.resolve(settingsState.config);
+    return settingsLoad();
   }
 
   function settingsRenderProviders(){
@@ -2547,15 +2643,18 @@
     }
 
     list.innerHTML = cfg.providers.map(function(p, vi){
-      // Find original index in cfg.providers for button handlers
+      // 在 cfg.providers 中找到原始索引，供按钮回调使用
       var origIdx = cfg.providers.indexOf(p);
       var isActive = p.name === cfg.active_provider;
       var preset = getPresets().find(function(pr){ return pr.id === p.id; });
       var displayName = p.name || (preset ? preset.name : '');
-      var typeBadge = preset ? '模型商' : '自定义';
-      var keyDisplay = p.api_key_configured
-        ? '<div class="prov-key"><span class="key-dot">●</span>' + escapeHtml(p.api_key_masked || '****') + '</div>'
-        : '<div class="prov-key" style="color:var(--red)"><span class="key-dot" style="color:var(--red)">●</span>未配置 Key</div>';
+      var isLocal = p.id && String(p.id).indexOf('local-') === 0;
+      var typeBadge = isLocal ? '本地' : (preset ? '模型商' : '自定义');
+      var keyDisplay = isLocal
+        ? '<div class="prov-key" style="color:var(--text3)"><span class="key-dot" style="color:var(--text3)">●</span>本地服务 · 无需 Key</div>'
+        : (p.api_key_configured
+          ? '<div class="prov-key"><span class="key-dot">●</span>' + escapeHtml(p.api_key_masked || '****') + '</div>'
+          : '<div class="prov-key" style="color:var(--red)"><span class="key-dot" style="color:var(--red)">●</span>未配置 Key</div>');
       var actions = '';
       if(isActive) {
         actions = '<button class="btn btn-sm" style="min-width:56px;color:var(--accent);cursor:default;width:100%;margin-bottom:4px" disabled>使用中</button>' +
@@ -2581,7 +2680,7 @@
   window.settingsActivate = function(i){
     var provName = settingsState.config.providers[i].name;
     settingsState.config.active_provider = provName;
-    // Immediate render before async save
+    // 异步保存前先立即渲染
     settingsRenderProviders();
     settingsSaveConfig();
   };
@@ -2604,7 +2703,7 @@
     }
     if(!confirm('确定删除 "' + (prov.name || prov.id) + '" 吗？')) return;
     settingsState.config.providers.splice(i, 1);
-    // If deleted the active one, switch to another
+    // 如果删除的是当前使用的服务，切换到另一个
     if(settingsState.config.active_provider === prov.name){
       settingsState.config.active_provider = settingsState.config.providers.length > 0
         ? settingsState.config.providers[0].name : '';
@@ -2654,7 +2753,7 @@
     var sel = document.getElementById('presetSelect');
     var presets = getPresets();
     var allPresets = presets.concat([{ id: 'custom', name: '自定义', base_url: '' }]);
-    sel.innerHTML = '<option value="">请选择服务商...</option>';
+    sel.innerHTML = '<option value="" disabled selected>请选择服务商...</option>';
     allPresets.forEach(function(p){
       var opt = document.createElement('option');
       opt.value = p.id;
@@ -2669,6 +2768,21 @@
     var customWrap = document.getElementById('modelCustomWrap');
     var input = document.getElementById('modelInput');
     var models = PROVIDER_MODELS[presetId] || [];
+    // 自定义商（custom-* / "custom" / 无预置模型）：模型名只能手动文本输入。
+    // 隐藏下拉与“返回下拉列表选择”入口，避免点返回后下拉只剩一个已选项、onchange 不触发而无法再输入。
+    var backWrap = document.getElementById('modelBackToListWrap');
+    var isCustomProvider = (presetId === 'custom') ||
+      (typeof presetId === 'string' && presetId.indexOf('custom-') === 0) ||
+      !models.length;
+    if(isCustomProvider){
+      select.innerHTML = '';
+      select.style.display = 'none';
+      customWrap.style.display = '';
+      if(backWrap) backWrap.style.display = 'none';
+      input.value = currentValue || '';
+      return;
+    }
+    if(backWrap) backWrap.style.display = '';
     var html = '';
     models.forEach(function(m){
       html += '<option value="'+escapeHtml(m)+'">'+escapeHtml(m)+'</option>';
@@ -2682,10 +2796,19 @@
       select.style.display = 'none';
       input.value = currentValue;
     } else {
-      select.value = currentValue || (models[0] || '__custom__');
-      customWrap.style.display = 'none';
-      select.style.display = '';
-      input.value = (select.value === '__custom__') ? '' : select.value;
+      var resolved = currentValue || (models[0] || '__custom__');
+      select.value = resolved;
+      if(resolved === '__custom__'){
+        // 预置模型列表为空（如自定义服务商）时，下拉默认停在 "+ 自定义模型..."，
+        // 此时 onchange 不会触发，必须主动展开手动输入框，否则无法输入模型名。
+        customWrap.style.display = '';
+        select.style.display = 'none';
+        input.value = '';
+      } else {
+        customWrap.style.display = 'none';
+        select.style.display = '';
+        input.value = resolved;
+      }
     }
   }
 
@@ -2713,6 +2836,13 @@
 
   window.settingsSelectPreset = function(presetId){
     settingsState.selectedPreset = presetId;
+    // 防坑：从本地模式切回普通预设/自定义时，恢复 API Key 分组与预设分组的显示
+    settingsState.localMode = false;
+    document.getElementById('apiKeyGroup').style.display = '';
+    document.getElementById('modelGroup').style.display = '';
+    document.getElementById('paramsGroup').style.display = '';
+    var _pgSel = document.getElementById('presetGroup');
+    if(_pgSel) _pgSel.style.display = '';
     var connGroup = document.getElementById('connectionInfoGroup');
     var connUrl = document.getElementById('connectionDefaultUrl');
     var baseUrlInput = document.getElementById('baseUrlInput');
@@ -2736,57 +2866,160 @@
     } else {
       connGroup.style.display = 'none';
       if (nameGroup) nameGroup.style.display = 'none';
+      document.getElementById('apiKeyGroup').style.display = 'none';
+      document.getElementById('modelGroup').style.display = 'none';
+      document.getElementById('paramsGroup').style.display = 'none';
     }
-    // Refresh model select when switching provider preset
+    // 按 A/B 分类设置 base_url 可编辑性（A 类只读回显默认地址，B 类/custom 可编辑）
+    settingsApplyBaseUrlMode(presetId);
+    // 切换服务商预设时刷新模型下拉列表
     settingsPopulateModelSelect(presetId, '');
-    // Reset API key placeholder
+    // 重置 API Key 占位符
     var keyInput = document.getElementById('apiKeyInput');
     keyInput.placeholder = 'sk-...';
-    // Reset test result
+    // 重置测试结果
     document.getElementById('formTestResult').textContent = '';
   };
 
+  // --- #28 从 base_url 自动提取自定义供应商名 ---
+  function extractProviderName(url) {
+    try {
+      var hostname = new URL(url).hostname;
+      if (!hostname) return '';
+      if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname) || hostname === 'localhost') return '';
+      var parts = hostname.split('.');
+      // 常见 TLD（含二级 TLD）
+      var tlds = ['com.cn','co.jp','co.uk','com.au','com','cn','ai','io','org','net','co','cc','dev','app','cloud'];
+      // 从右侧剥离 TLD
+      for (var i = 0; i < tlds.length; i++) {
+        var tld = tlds[i];
+        var tldParts = tld.split('.');
+        if (parts.length > tldParts.length) {
+          var tail = parts.slice(parts.length - tldParts.length).join('.');
+          if (tail === tld) { parts = parts.slice(0, parts.length - tldParts.length); break; }
+        }
+      }
+      // 从左侧剥离子域黑名单
+      var subBlacklist = ['api','token','open','platform','gateway','service','chat','ai'];
+      while (parts.length > 1 && subBlacklist.indexOf(parts[0]) !== -1) { parts.shift(); }
+      return parts.length > 0 ? parts[0] : '';
+    } catch(e) { return ''; }
+  }
+
+  // base_url blur 时自动填写供应商名（仅当自定义名为空）
+  (function() {
+    var baseEl = document.getElementById('baseUrlInput');
+    if (!baseEl) return;
+    baseEl.addEventListener('blur', function() {
+      var nameInput = document.getElementById('customNameInput');
+      var nameGroup = document.getElementById('customNameGroup');
+      if (!nameInput || !nameGroup) return;
+      // 仅在 customNameGroup 可见（自定义模式）且名称为空时填入
+      if (nameGroup.style.display === 'none') return;
+      if (nameInput.value.trim() !== '') return;
+      var extracted = extractProviderName(baseEl.value.trim());
+      if (extracted) nameInput.value = extracted;
+    });
+  })();
+  // --- end #28 ---
+
+  // 添加本地模型：通用本地 OpenAI 兼容端点（Ollama / LM Studio / vLLM 等），无需 API Key
+  window.settingsAddLocalModel = function(){
+    settingsEnsureLoaded().catch(function(){}).then(function(){
+      settingsState.editingIndex = -1;
+      settingsState.selectedPreset = 'custom'; // 复用 custom 分支使模型走手动输入
+      settingsState.localMode = true;
+      settingsState.keyVisible = false;
+      document.getElementById('modalTitle').textContent = '添加本地模型';
+      document.getElementById('providerForm').reset();
+      document.getElementById('providerForm').temperature.value = '0.7';
+      document.getElementById('providerForm').max_tokens.value = '4096';
+      document.getElementById('formTestResult').textContent = '';
+      // 隐藏预设选择器分组
+      document.getElementById('presetGroup').style.display = 'none';
+      // 完全隐藏 API Key 分组（本地服务无需鉴权）
+      document.getElementById('apiKeyGroup').style.display = 'none';
+      document.getElementById('apiKeyInput').value = '';
+      document.getElementById('keyHint').textContent = '';
+      // 显示名称输入
+      var nameGroup = document.getElementById('customNameGroup');
+      if(nameGroup) nameGroup.style.display = '';
+      var nameInput = document.getElementById('customNameInput');
+      nameInput.value = '';
+      nameInput.placeholder = '例如：本地 Ollama';
+      // 显示连接信息：base_url 可编辑、必填
+      document.getElementById('connectionInfoGroup').style.display = '';
+      document.getElementById('connectionDefaultUrl').textContent = '填写本地服务地址，如 Ollama http://localhost:11434/v1、LM Studio http://localhost:1234/v1';
+      var baseUrlInput = document.getElementById('baseUrlInput');
+      baseUrlInput.value = '';
+      baseUrlInput.placeholder = 'http://localhost:11434/v1';
+      settingsApplyBaseUrlMode('local'); // local-* 非 A 类 → base_url 可编辑
+      // 模型手动输入（复用 custom 分支）
+      settingsPopulateModelSelect('custom', '');
+      document.getElementById('modelGroup').style.display = '';
+      document.getElementById('paramsGroup').style.display = '';
+      document.getElementById('btnDeleteProv').style.display = 'none';
+      document.getElementById('btnSetDefault').style.display = 'none';
+      var testBtn = document.querySelector('#providerForm button[onclick="settingsTestConnection()"]');
+      if(testBtn) testBtn.style.display = '';
+      var saveBtn = document.querySelector('#providerForm button[type="submit"]');
+      if(saveBtn) saveBtn.textContent = '保存';
+      document.getElementById('providerModal').classList.add('show');
+    });
+  };
+
   window.settingsAddProvider = function(){
-    settingsState.editingIndex = -1;
-    settingsState.selectedPreset = '';
-    settingsState.keyVisible = false;
-    document.getElementById('modalTitle').textContent = '添加模型服务';
-    document.getElementById('providerForm').reset();
-    document.getElementById('providerForm').temperature.value = '0.7';
-    document.getElementById('providerForm').max_tokens.value = '4096';
-    document.getElementById('apiKeyInput').type = 'password';
-    document.getElementById('apiKeyInput').value = '';
-    document.getElementById('keyHint').textContent = '';
-    document.getElementById('btnDeleteProv').style.display = 'none';
-    document.getElementById('formTestResult').textContent = '';
-    // Reset model select
-    settingsPopulateModelSelect('', '');
-    // Show preset selector
-    document.getElementById('presetGroup').style.display = '';
-    renderPresetSelect('');
-    document.getElementById('connectionInfoGroup').style.display = 'none';
-    document.getElementById('connectionDefaultUrl').textContent = '';
-    document.getElementById('baseUrlInput').value = '';
-    // Ensure all fields are visible when adding a new provider
-    document.getElementById('apiKeyGroup').style.display = '';
-    document.getElementById('modelGroup').style.display = '';
-    document.getElementById('paramsGroup').style.display = '';
-    var testBtn = document.querySelector('#providerForm button[onclick="settingsTestConnection()"]');
-    if (testBtn) testBtn.style.display = '';
-    document.getElementById('providerModal').classList.add('show');
+    settingsEnsureLoaded().catch(function(){}).then(function(){
+      settingsState.editingIndex = -1;
+      settingsState.selectedPreset = '';
+      settingsState.keyVisible = false;
+      settingsState.localMode = false;
+      document.getElementById('modalTitle').textContent = '添加模型服务';
+      document.getElementById('providerForm').reset();
+      document.getElementById('providerForm').temperature.value = '0.7';
+      document.getElementById('providerForm').max_tokens.value = '4096';
+      document.getElementById('apiKeyInput').type = 'password';
+      document.getElementById('apiKeyInput').value = '';
+      document.getElementById('keyHint').textContent = '';
+      document.getElementById('btnDeleteProv').style.display = 'none';
+      document.getElementById('formTestResult').textContent = '';
+      // 重置模型下拉列表
+      settingsPopulateModelSelect('', '');
+      // 显示预设选择器（防坑：从本地模式返回时需恢复，避免残留 display:none）
+      document.getElementById('presetGroup').style.display = '';
+      var _nameGroupAdd = document.getElementById('customNameGroup');
+      if(_nameGroupAdd) _nameGroupAdd.style.display = 'none';
+      renderPresetSelect('');
+      document.getElementById('connectionInfoGroup').style.display = 'none';
+      document.getElementById('connectionDefaultUrl').textContent = '';
+      document.getElementById('baseUrlInput').value = '';
+      // 添加新服务商：初始隐藏表单组，用户选择预设后由 settingsSelectPreset 显示
+      document.getElementById('apiKeyGroup').style.display = 'none';
+      document.getElementById('modelGroup').style.display = 'none';
+      document.getElementById('paramsGroup').style.display = 'none';
+      var testBtn = document.querySelector('#providerForm button[onclick="settingsTestConnection()"]');
+      if (testBtn) testBtn.style.display = '';
+      document.getElementById('providerModal').classList.add('show');
+    });
   };
 
   window.settingsEditProvider = function(i){
     settingsState.editingIndex = i;
     settingsState.keyVisible = false;
     var p = settingsState.config.providers[i];
-    document.getElementById('modalTitle').textContent = '编辑: ' + (p.name || '');
+    var isLocal = p.id && String(p.id).indexOf('local-') === 0;
+    settingsState.localMode = isLocal;
+    // 新增：立即重置表单组的显隐状态，防止上次阅读不同模式后的残留
+    document.getElementById('apiKeyGroup').style.display = isLocal ? 'none' : '';
+    document.getElementById('modelGroup').style.display = '';
+    document.getElementById('paramsGroup').style.display = '';
+    document.getElementById('modalTitle').textContent = isLocal ? '编辑本地模型' : ('编辑：' + (p.name || ''));
     var form = document.getElementById('providerForm');
     form.temperature.value = p.temperature;
     form.max_tokens.value = p.max_tokens;
     // 用下拉列表展示当前 provider 的预置模型，并自动选中/展示当前模型值
     settingsPopulateModelSelect(p.id, (p.model && p.model !== 'auto') ? p.model : '');
-    // API key: show masked value, type password
+    // API Key：显示掩码值，类型为 password
     var keyInput = document.getElementById('apiKeyInput');
     keyInput.type = 'password';
     keyInput.value = '';
@@ -2798,11 +3031,11 @@
       keyHint.textContent = '';
       keyInput.placeholder = 'sk-...';
     }
-    // Hide preset selector when editing (provider type is fixed)
+    // 编辑时隐藏预设选择器（服务商类型已固定）
     document.getElementById('presetGroup').style.display = 'none';
     var nameGroup2 = document.getElementById('customNameGroup');
     if (nameGroup2) nameGroup2.style.display = 'none';
-    // Show connection info with saved base_url
+    // 显示连接信息，带上已保存的 base_url
     var connGroup = document.getElementById('connectionInfoGroup');
     var connUrl = document.getElementById('connectionDefaultUrl');
     var baseUrlInput = document.getElementById('baseUrlInput');
@@ -2813,13 +3046,23 @@
     connUrl.textContent = defaultUrl ? ('留空时会使用默认地址：' + defaultUrl) : '请填写 API 地址';
     baseUrlInput.value = p.base_url || '';
     baseUrlInput.placeholder = '留空使用默认地址';
-    // Hide delete for active provider
+    if(isLocal){
+      connUrl.textContent = '本地服务地址，例如 Ollama http://localhost:11434/v1、LM Studio http://localhost:1234/v1';
+      baseUrlInput.placeholder = 'http://localhost:11434/v1';
+    }
+    // A 类内置商：base_url 只读回显默认地址（由 Hermes 管理）；B 类/custom 可编辑
+    if(settingsIsReadonlyBaseUrl(p.id) && !baseUrlInput.value){
+      baseUrlInput.value = defaultUrl || '';
+    }
+    settingsApplyBaseUrlMode(p.id);
+    // 当前使用的服务隐藏删除按钮
     var isActive = p.name === settingsState.config.active_provider;
     document.getElementById('btnDeleteProv').style.display = isActive ? 'none' : '';
     document.getElementById('btnSetDefault').style.display = isActive ? 'none' : '';
-    document.getElementById('apiKeyGroup').style.display = '';
-    document.getElementById('modelGroup').style.display = '';
-    document.getElementById('paramsGroup').style.display = '';
+    // 移除后面重复的设置，避免冗余（已在函数开头设置）
+    // document.getElementById('apiKeyGroup').style.display = isLocal ? 'none' : '';
+    // document.getElementById('modelGroup').style.display = '';
+    // document.getElementById('paramsGroup').style.display = '';
     var testBtn = document.querySelector('#providerForm button[onclick="settingsTestConnection()"]');
     if (testBtn) testBtn.style.display = '';
     var saveBtn = document.querySelector('#providerForm button[type="submit"]');
@@ -2860,16 +3103,25 @@
     };
 
     if(settingsState.editingIndex >= 0){
-      // Editing existing provider: preserve id, name
+      // 编辑已有服务商：保留 id、name
       var existing = settingsState.config.providers[settingsState.editingIndex];
       data.id = existing.id;
       data.name = existing.name;
-      // Connection info: use input if provided, else keep existing
+      // 连接信息：有输入则用输入，否则保留原值
       var editUrl = (form.base_url.value || '').trim().replace(/\/$/, '');
       data.base_url = editUrl || existing.base_url;
-      // API key: empty means keep existing (backend handles this)
+      // 自定义商 base_url 必填校验
+      if(existing.id && String(existing.id).indexOf('custom-') === 0 && !data.base_url){
+        alert('自定义服务商必须填写 API 地址（base_url）'); return;
+      }
+      // 本地模型编辑：base_url / 模型名必填校验（无需 Key）
+      if(existing.id && String(existing.id).indexOf('local-') === 0){
+        if(!data.base_url){ alert('本地模型必须填写服务地址（base_url）'); return; }
+        if(!modelVal || modelVal === 'auto'){ alert('本地模型必须填写模型名称'); return; }
+      }
+      // API Key：留空表示保持不变（由后端处理）
       data.api_key = keyVal || '****keep****';
-      // Preserve existing key status for UI display until backend confirms
+      // 后端确认前，保留原有 key 状态用于界面显示
       if (!keyVal) {
         data.api_key_configured = existing.api_key_configured;
         data.api_key_masked = existing.api_key_masked;
@@ -2879,18 +3131,52 @@
         data._raw_api_key = keyVal;
       }
       settingsState.config.providers[settingsState.editingIndex] = data;
+    } else if(settingsState.localMode){
+      // 添加本地模型：无需 API Key，id 采用 local- 前缀（类比 custom-）
+      var localUrl = (form.base_url.value || '').trim().replace(/\/$/, '');
+      if(!localUrl){ alert('本地模型必须填写服务地址（base_url）'); return; }
+      if(!modelVal || modelVal === 'auto'){ alert('本地模型必须填写模型名称'); return; }
+      var localName = (document.getElementById('customNameInput').value || '').trim();
+      var slugSrc = (localName || modelVal || String(Date.now())).toLowerCase();
+      var localSlug = slugSrc.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+      if(!localSlug) localSlug = String(Date.now());
+      data.id = 'local-' + localSlug;
+      var _localIds = (settingsState.config.providers || []).map(function(pp){ return pp.id; });
+      if(_localIds.indexOf(data.id) !== -1) data.id = 'local-' + localSlug + '-' + Date.now();
+      data.name = localName || ('本地模型 ' + modelVal);
+      data.base_url = localUrl;
+      data.api_key = 'none'; // 本地模型不提交 api_key
+      settingsState.config.providers.push(data);
     } else {
-      // Adding new provider
+      // 添加新服务商
       var presetId = settingsState.selectedPreset;
       if(!presetId){ alert('请选择一个服务商'); return; }
       var presets = getPresets();
       var preset = presets.find(function(p){ return p.id === presetId; });
       var userUrl = (form.base_url.value || '').trim().replace(/\/$/, '');
       if(presetId === 'custom'){
-        data.id = 'custom-' + Date.now();
-        data.name = (document.getElementById('customNameInput').value || '').trim() || 'Custom';
+        var customName = (document.getElementById('customNameInput').value || '').trim();
+        // 编辑模式：保留原 id 不变；新增模式：slug 归一化
+        if(settingsState.editingIndex !== null && settingsState.editingIndex >= 0){
+          // 编辑自定义提供商：复用原有 id，避免改名导致 id 突变
+          var existingCustom = (settingsState.config.providers || []).find(function(pp){ 
+            return pp.id === (settingsState.config.providers[settingsState.editingIndex] || {}).id;
+          });
+          data.id = existingCustom ? existingCustom.id : ('custom-' + Date.now());
+        } else {
+          // 新增自定义提供商：slug 归一化并检查冲突
+          var customSlug = (customName || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+          if(customSlug){
+            data.id = 'custom-' + customSlug;
+            var _customIds = (settingsState.config.providers || []).map(function(pp){ return pp.id; });
+            if(_customIds.indexOf(data.id) !== -1) data.id = 'custom-' + customSlug + '-' + Date.now();
+          } else {
+            data.id = 'custom-' + Date.now();
+          }
+        }
+        data.name = customName || 'Custom';
         data.base_url = userUrl;
-        if(!data.base_url){ alert('请输入 API 地址'); return; }
+        if(!data.base_url){ alert('自定义服务商必须填写 API 地址（base_url）'); return; }
       } else if(preset){
         data.id = preset.id;
         data.name = preset.name;
@@ -2899,7 +3185,7 @@
         alert('未知服务商'); return;
       }
       data.api_key = keyVal || 'none';
-      // Pass raw key to backend for .env writing (backend will mask before saving to config)
+      // 将原始 key 传给后端写入 .env（后端保存到配置前会做掩码）
       if (keyVal && keyVal.length > 8) {
         data._raw_api_key = keyVal;
       }
@@ -2907,7 +3193,7 @@
     }
     settingsSaveConfig().then(function(){
       settingsCloseModal();
-    }).catch(function(){}); // error already shown by settingsSaveConfig
+    }).catch(function(){}); // 错误已由 settingsSaveConfig 提示
   };
 
   window.settingsDeleteProvider = function(){
@@ -2923,11 +3209,11 @@
     if(settingsState.config.providers.length > 0 && !settingsState.config.providers.find(function(p){ return p.name === settingsState.config.active_provider; })){
       settingsState.config.active_provider = settingsState.config.providers[0].name;
     }
-    // Immediately update UI before async save
+    // 异步保存前先立即更新界面
     settingsRenderProviders();
     settingsCloseModal();
     settingsSaveConfig().catch(function(){
-      // revert on failure
+      // 失败时回滚
       settingsLoad();
     });
   };
@@ -2942,7 +3228,7 @@
       temperature: Number(form.temperature.value),
       max_tokens: Number(form.max_tokens.value),
     };
-    // Resolve base_url and api_key
+    // 解析 base_url 和 api_key
     if(settingsState.editingIndex >= 0){
       var existing = settingsState.config.providers[settingsState.editingIndex];
       var editUrl = (form.base_url.value || '').trim().replace(/\/$/, '');
@@ -2962,6 +3248,11 @@
       data.api_key = keyInput.value.trim() || 'none';
     }
     var result = document.getElementById('formTestResult');
+    if(!data.base_url){
+      result.textContent = '请先填写 base_url';
+      result.className = 'form-test error';
+      return;
+    }
     result.textContent = '测试中...';
     result.className = 'form-test';
     var headers = { 'Content-Type': 'application/json' };
@@ -2988,7 +3279,7 @@
   // 弹窗只通过关闭按钮或操作按钮关闭
 
   // ═══════════════════════════════════════════════
-  // DASHBOARD TOGGLE
+  // Dashboard 开关
   // ═══════════════════════════════════════════════
   window.toggleDashboard = function(){
     var input = document.getElementById('dashToggleInput');
@@ -3025,7 +3316,7 @@
   };
 
   // ═══════════════════════════════════════════════
-  // HERMES UPDATE
+  // Hermes 更新
   // ═══════════════════════════════════════════════
   var updatePollTimer = null;
 
@@ -3174,10 +3465,30 @@
   }
 
 
-  window.savedView = null;
-  try { window.savedView = localStorage.getItem('hermes_view'); } catch(e){}
+  // ── 深链解析：URL 参数优先级高于 localStorage ──
+  (function(){
+    var params = new URLSearchParams(window.location.search);
+    var urlSession = params.get('session_id');
+    var urlView = params.get('view');
+    if (urlSession) {
+      try { sessionStorage.setItem('hermes_chat_session', urlSession); } catch(e){}
+      window.savedView = 'chat';
+      window.__deepLinked = true;
+    } else if (urlView) {
+      window.savedView = urlView;
+      window.__deepLinked = true;
+    }
+  })();
+  if (!window.savedView) {
+    window.savedView = null;
+    try { window.savedView = localStorage.getItem('hermes_view'); } catch(e){}
+  }
   switchView(window.savedView || 'overview');
-  fetchToken().then(function(){ refresh(); });
+  fetchToken().then(function(){
+    refresh();
+    // 预加载模型配置，避免首次打开"添加模型服务"时预设列表为空
+    settingsEnsureLoaded().catch(function(){});
+  });
   setInterval(refresh, 10000);
 
   if (window.visualViewport) {

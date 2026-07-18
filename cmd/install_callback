@@ -53,7 +53,6 @@ ensure_uv() {
         local TMP_DIR
         TMP_DIR="$(mktemp -d)"
 
-        # 检测架构
         local ARCH
         case "$(uname -m)" in
             x86_64)  ARCH="x86_64" ;;
@@ -172,13 +171,11 @@ if [ "${SKIP_INSTALL}" = "false" ]; then
         log_msg "venv created"
     fi
 
-    # 安装 hermes-agent
     log_msg ">>> 正在安装 hermes-agent[all]==${HERMES_VERSION}，依赖较多请耐心等待 ..."
     UV_INDEX_URL="https://mirrors.aliyun.com/pypi/simple/" \
         "$UV" pip install --no-cache --python "${VENV_DIR}/bin/python3" "hermes-agent[all]==${HERMES_VERSION}" \
         2>>"${LOG_FILE}"
 
-    # 验证安装
     if [ ! -f "${HERMES}" ]; then
         toast_err "hermes-agent 安装失败: $(tail -5 "${LOG_FILE}" 2>/dev/null)"
         exit 1
@@ -186,7 +183,6 @@ if [ "${SKIP_INSTALL}" = "false" ]; then
     log_msg "hermes binary verified"
 fi
 
-# 最终版本确认
 ACTUAL_VER=$("$UV" pip show --python "${VENV_DIR}/bin/python3" hermes-agent 2>>"${LOG_FILE}" | grep -i '^version' | awk '{print $2}' || echo "unknown")
 log_msg "hermes-agent installed: ${ACTUAL_VER}"
 
@@ -245,7 +241,6 @@ if [ -n "${TRIM_USERNAME}" ]; then
     log_msg "APP_DIR=${APP_DIR} owner=$(stat -c '%U:%G' "${APP_DIR}" 2>/dev/null || echo 'N/A') perms=$(stat -c '%a' "${APP_DIR}" 2>/dev/null || echo 'N/A')"
     log_msg "DATA_DIR=${DATA_DIR} owner=$(stat -c '%U:%G' "${DATA_DIR}" 2>/dev/null || echo 'N/A') perms=$(stat -c '%a' "${DATA_DIR}" 2>/dev/null || echo 'N/A')"
 
-    # APP_DIR
     if chown -R "${TRIM_USERNAME}:${TRIM_USERNAME}" "${APP_DIR}" 2>>"${LOG_FILE}"; then
         log_msg "chown -R ${TRIM_USERNAME}:${TRIM_USERNAME} ${APP_DIR} → OK"
     else
@@ -257,7 +252,6 @@ if [ -n "${TRIM_USERNAME}" ]; then
         log_msg "chmod 775 ${APP_DIR} → FAILED (exit=$?)"
     fi
 
-    # DATA_DIR
     if chown -R "${TRIM_USERNAME}:${TRIM_USERNAME}" "${DATA_DIR}" 2>>"${LOG_FILE}"; then
         log_msg "chown -R ${TRIM_USERNAME}:${TRIM_USERNAME} ${DATA_DIR} → OK"
     else

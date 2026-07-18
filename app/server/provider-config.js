@@ -19,6 +19,14 @@ export const PROVIDER_PRESETS = {
   "ollama-cloud":    { name: "Ollama Cloud",   base_url: "https://ollama.com/v1" },
   "lmstudio":        { name: "LM Studio",      base_url: "http://localhost:1234/v1" },
   "alibaba":         { name: "通义千问",        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+  // ── Hermes 内置 api_key 类新增商（权威值取自 auth.py PROVIDER_REGISTRY）iranee ──
+  "stepfun":             { name: "StepFun Step Plan",          base_url: "https://api.stepfun.ai/step_plan/v1" },
+  "arcee":               { name: "Arcee AI",                   base_url: "https://api.arcee.ai/api/v1" },
+  "gmi":                 { name: "GMI Cloud",                  base_url: "https://api.gmi-serving.com/v1" },
+  "kilocode":            { name: "Kilo Code",                  base_url: "https://api.kilo.ai/api/gateway" },
+  "alibaba-coding-plan": { name: "Alibaba Cloud (Coding Plan)", base_url: "https://coding-intl.dashscope.aliyuncs.com/v1" },
+  "xiaomi":              { name: "Xiaomi MiMo",                base_url: "https://api.xiaomimimo.com/v1" },
+  "tencent-tokenhub":    { name: "Tencent TokenHub",           base_url: "https://tokenhub.tencentmaas.com/v1" },
 };
 
 // ── 每个供应商的可用模型列表（只保留当前主力型号）──────────────────────
@@ -59,7 +67,8 @@ export const PROVIDER_MODELS = {
     "google/gemini-3.1-pro-preview", "deepseek/deepseek-v4-pro",
   ],
   "xai": [
-    "grok-4.5", "grok-4.3", "grok-4.1-fast-reasoning", "grok-4.1-fast-non-reasoning",
+    // P3：清理 xAI 2026-05-15 已下线的 grok-4.1-fast 家族，补当前主力 grok-4.20。iranee
+    "grok-4.5", "grok-4.3", "grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning",
   ],
   "mistral": [
     "mistral-large-latest", "mistral-medium-latest", "mistral-small-latest", "codestral-latest",
@@ -67,9 +76,32 @@ export const PROVIDER_MODELS = {
   "nvidia":          ["meta/llama-3.1-70b-instruct", "minimaxai/minimax-m2.7"],
   "huggingface":     ["meta-llama/Meta-Llama-3-70B-Instruct"],
   "ollama-cloud":    ["gpt-oss:120b", "qwen3-coder:480b-cloud", "glm-4.6:cloud"],
-  "lmstudio":        ["local-model"],
+  "ollama-local":    ["llama3.2", "qwen2.5-coder:7b", "gemma2:9b", "mistral:7b", "phi3:mini"],
+  "lmstudio":        ["local-model", "custom-model"],
   "alibaba": [
     "qwen-plus", "qwen-max", "qwen3.5-plus", "qwen3-max-2026-01-23", "qwen3-coder-next",
+  ],
+  // ── Hermes 内置 api_key 类新增商（模型取自 hermes_cli/models.py）iranee ──
+  "stepfun": [
+    "step-3.5-flash", "step-3.5-flash-2603",
+  ],
+  "arcee": [
+    "trinity-large-thinking", "trinity-large-preview", "trinity-mini",
+  ],
+  "gmi": [
+    "zai-org/GLM-5.1-FP8", "deepseek-ai/DeepSeek-V3.2", "moonshotai/Kimi-K2.5", "google/gemini-3.1-flash-lite-preview",
+  ],
+  "kilocode": [
+    "anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5.4", "google/gemini-3-pro-preview",
+  ],
+  "alibaba-coding-plan": [
+    "qwen3.7-max", "qwen3.6-plus", "qwen3.5-plus", "qwen3-coder-plus",
+  ],
+  "xiaomi": [
+    "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni",
+  ],
+  "tencent-tokenhub": [
+    "hy3-preview",
   ],
 };
 
@@ -83,5 +115,36 @@ export const PROVIDER_API_KEYS = {
   "openrouter": "OPENROUTER_API_KEY","xai": "XAI_API_KEY",
   "mistral": "MISTRAL_API_KEY",     "nvidia": "NVIDIA_API_KEY",
   "huggingface": "HF_TOKEN",        "ollama-cloud": "OLLAMA_API_KEY",
-  "lmstudio": "LM_API_KEY",         "alibaba": "DASHSCOPE_API_KEY",
+  "ollama-local": "OLLAMA_LOCAL_API_KEY", "lmstudio": "LMSTUDIO_API_KEY", "alibaba": "DASHSCOPE_API_KEY",
+  // ── Hermes 内置 api_key 类新增商（主 env 取自 auth.py api_key_env_vars）iranee ──
+  "stepfun": "STEPFUN_API_KEY",     "arcee": "ARCEEAI_API_KEY",
+  "gmi": "GMI_API_KEY",             "kilocode": "KILOCODE_API_KEY",
+  "alibaba-coding-plan": "ALIBABA_CODING_PLAN_API_KEY",
+  "xiaomi": "XIAOMI_API_KEY",       "tencent-tokenhub": "TOKENHUB_API_KEY",
+};
+
+// ── A/B 分类（Sam 任务16 决策表）─────────────────────────────────────
+// A 类：仅写 model 段，端点与原生协议交给 Hermes 内置 PROVIDER_REGISTRY 处理；
+// B 类：必须写 providers 段（base_url + api_key + default_model）。iranee
+// 注：动态 id 约定 —— custom-*（第三方自定义商，写 providers 段含 api_key）、
+//     local-*（本地 OpenAI 兼容端点，写 providers 段仅 base_url + default_model，省略 api_key），
+//     二者均不在此表中，按“非预设”走 providers 段逻辑（详见 monitor.js customEntries）。iranee
+export const PROVIDER_CLASSES = {
+  "openai": "A",         "openrouter": "A",     "anthropic": "A",
+  "deepseek": "A",       "gemini": "A",         "kimi-coding": "A",
+  "kimi-coding-cn": "A", "zai": "A",            "minimax": "A",
+  "minimax-cn": "A",     "xai": "A",            "nvidia": "A",
+  "huggingface": "A",    "lmstudio": "B",       "alibaba": "A",
+  "siliconflow": "B",    "mistral": "B",        "ollama-cloud": "B",
+  "ollama-local": "B",
+  // ── 新增商均为 Hermes 内置（A 类：只写 model 段、base_url 编辑框只读）iranee ──
+  "stepfun": "A",        "arcee": "A",          "gmi": "A",
+  "kilocode": "A",       "alibaba-coding-plan": "A",  "xiaomi": "A",
+  "tencent-tokenhub": "A",
+};
+
+// ── provider id → Hermes 内部 provider id 映射 ───────────────────────
+// 仅列出与自身 id 不同的项；未列出者默认使用自身 id。iranee
+export const PROVIDER_HERMES_IDS = {
+  "openai": "openai-api",
 };

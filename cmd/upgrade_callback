@@ -46,7 +46,6 @@ ensure_uv() {
         local TMP_DIR
         TMP_DIR="$(mktemp -d)"
 
-        # 检测架构
         local ARCH
         case "$(uname -m)" in
             x86_64)  ARCH="x86_64" ;;
@@ -217,6 +216,15 @@ if [ -d "${PROMPTS_SRC}" ]; then
         cp -a "${PROMPTS_SRC}/skills/." "${DATA_DIR}/skills/"
         log_msg "skills redeployed"
     fi
+
+    # 清理旧版本遗留的已合并技能目录（v5→v3 精简）
+    for OLD_SKILL in fnos-common-workflows fnos-dev fnos-ops fnos-ws-api; do
+        OLD_DIR="${DATA_DIR}/skills/fnos-knowledge/${OLD_SKILL}"
+        if [ -d "${OLD_DIR}" ]; then
+            rm -rf "${OLD_DIR}"
+            log_msg "removed legacy skill: ${OLD_SKILL}"
+        fi
+    done
 
     # SOUL.md — 不存在才复制
     if [ -f "${PROMPTS_SRC}/SOUL.md" ] && [ ! -f "${DATA_DIR}/SOUL.md" ]; then

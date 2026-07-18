@@ -29,7 +29,6 @@ start_process() {
     mkdir -p "${SOCK_DIR}" 2>/dev/null
     chmod 755 "${SOCK_DIR}" 2>/dev/null
 
-    # 确保 VAR 目录存在
     mkdir -p "${TRIM_PKGVAR}" 2>/dev/null
 
     log_msg "Starting Hermes Agent monitor (socket mode) ..."

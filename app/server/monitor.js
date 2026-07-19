@@ -1,6 +1,6 @@
 // Hermes Agent 监控服务 — 基于 Bun 的 HTTP 服务（Unix Socket / TCP）
-import { spawn } from "bun";
-import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync, statSync, watch, chmodSync, readdirSync } from "fs";
+import { spawn, spawnSync } from "bun";
+import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync, statSync, symlinkSync, watch, chmodSync, readdirSync } from "fs";
 import { randomBytes } from "crypto";
 import { networkInterfaces } from "os";
 import { PROVIDER_PRESETS, PROVIDER_MODELS, PROVIDER_API_KEYS, PROVIDER_CLASSES, PROVIDER_HERMES_IDS } from "./provider-config.js";
@@ -69,6 +69,20 @@ const VENV_BIN       = `${DATA_DIR}/venv/bin`;
 const HERMES_BIN     = `${VENV_BIN}/hermes`;
 const UV_BIN_PATH    = `${VENV_BIN}/uv`;
 
+// ─── Node.js 运行时探测（hermes TUI 需要 node；版本在安装期由 install_callback 固定） ───
+
+const NODE_CANDIDATES = [
+  `${APP_DIR}/runtime/node/bin/node`,            // ① 打包内置（最高优先）
+  `${DATA_DIR}/node/bin/node`,                   // ② 安装期 ensure_node 下载并固定的路径
+];
+const resolvedNodeBin = NODE_CANDIDATES.find(p => {
+  try { return existsSync(p) && (statSync(p).mode & 0o111) !== 0; } catch { return false; }
+}) || null;
+const resolvedNodeDir = resolvedNodeBin ? resolvedNodeBin.replace(/\/[^/]+$/, "") : null;
+
+// ─── HERMES_TUI_DIR：TUI 运行时 shim 目录 ──────────────────────────────
+const TUI_DIR = `${DATA_DIR}/tui`;
+
 // ─── 聊天数据路径（持久化于 VAR_DIR → /vol1/@appdata/） ────────────────
 const CHAT_DIR      = `${VAR_DIR}/chat`;
 const CONFIG_FILE   = `${CHAT_DIR}/config.json`;
@@ -92,6 +106,29 @@ function generateApiKey() {
 
 mkdirSync(VAR_DIR, { recursive: true });
 initChatData();
+
+// ─── TUI shim 初始化：确保 TUI_DIR/dist/entry.js 可用 ──────────────────
+try {
+  mkdirSync(`${TUI_DIR}/dist`, { recursive: true });
+  const tuiEntry = `${TUI_DIR}/dist/entry.js`;
+  if (!existsSync(tuiEntry)) {
+    // 动态探测 hermes_cli 的 tui_dist/entry.js（不硬编码 python 版本）
+    const pyResult = spawnSync(
+      [`${VENV_BIN}/python3`, "-c", "import hermes_cli,os;print(os.path.dirname(hermes_cli.__file__))"],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const hermesCli = pyResult.stdout?.toString().trim();
+    if (hermesCli && existsSync(`${hermesCli}/tui_dist/entry.js`)) {
+      try { unlinkSync(tuiEntry); } catch {}
+      symlinkSync(`${hermesCli}/tui_dist/entry.js`, tuiEntry);
+      console.log(`[monitor] tui symlink: ${tuiEntry} -> ${hermesCli}/tui_dist/entry.js`);
+    } else {
+      console.log("[monitor] WARNING: hermes_cli/tui_dist/entry.js not found, TUI may rely on bundled fallback");
+    }
+  }
+} catch (e) {
+  console.log(`[monitor] WARNING: TUI shim init failed (${e.message}), non-fatal`);
+}
 
 // ─── 启动清理：杀掉残留进程、清除旧 PID、重置日志 ─────────
 function readPidSync(path) {
@@ -1001,7 +1038,12 @@ const wsHandler = {
       const { targetUrl } = ws.data;
       log(`[WS-PROXY] open → ${targetUrl}`);
       try {
-        const upstream = new WebSocket(targetUrl);
+        // 显式传 Host header 匹配上游 loopback 校验（_is_accepted_host）
+        const upstream = new WebSocket(targetUrl, {
+          headers: {
+            "Host": `${DASHBOARD_BIND}:${DASHBOARD_PORT}`,
+          },
+        });
         ws.data.upstream = upstream;
         upstream.addEventListener("open", () => {
           log(`[WS-PROXY] upstream connected`);
@@ -1099,6 +1141,27 @@ async function portAlive(port, host = "localhost", timeoutMs = 2000) {
   } catch { return false; }
 }
 
+// 直接读 /proc/net/tcp[6] 判断本机是否有进程在指定端口 LISTEN。
+// 适用于非 HTTP 的内部端口（如 8642 网关通信端口），不受 HTTP 探活失败或
+// localhost 解析为 IPv6 影响，比 portAlive 的 HTTP OPTIONS 探测更可靠。
+function isPortListening(port) {
+  const suffix = ":" + Number(port).toString(16).toUpperCase().padStart(4, "0");
+  for (const f of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    try {
+      const lines = readFileSync(f, "utf8").split("\n");
+      for (let i = 1; i < lines.length; i++) {
+        const parts = lines[i].trim().split(/\s+/);
+        if (parts.length < 4) continue;
+        // parts[1]=local_address(HEX_IP:HEX_PORT)  parts[3]=st(0A=LISTEN)
+        if (parts[3] === "0A" && parts[1] && parts[1].toUpperCase().endsWith(suffix)) {
+          return true;
+        }
+      }
+    } catch {}
+  }
+  return false;
+}
+
 function findPidByCmd(pattern) {
   try {
     const dirs = readdirSync("/proc").filter(d => /^\d+$/.test(d));
@@ -1109,6 +1172,25 @@ function findPidByCmd(pattern) {
         const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8")
           .replace(/\0/g, " ").trim();
         if (cmdline.includes(pattern)) return pid;
+      } catch {}
+    }
+    return null;
+  } catch { return null; }
+}
+
+// 定位常驻网关进程：官方 Dashboard 以 `gateway restart` 拉起的常驻网关，
+// 其命令行不含 `gateway run`，而 monitor 自己拉起的是 `gateway run`，
+// 两种都需识别，否则 Dashboard 重启后 monitor 面板看不到网关进程。
+function findGatewayPid() {
+  try {
+    const dirs = readdirSync("/proc").filter(d => /^\d+$/.test(d));
+    for (const dir of dirs) {
+      const pid = Number(dir);
+      if (!pid) continue;
+      try {
+        const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8")
+          .replace(/\0/g, " ").trim();
+        if (/hermes/.test(cmdline) && /gateway\s+(run|restart)/.test(cmdline)) return pid;
       } catch {}
     }
     return null;
@@ -1193,7 +1275,11 @@ function spawnHermes(name, pidPath, args) {
     ...process.env,
     HOME: DATA_DIR,
     HERMES_HOME: DATA_DIR,
-    PATH: `${VENV_BIN}:/usr/local/bin:/usr/bin:/bin`,
+    PATH: resolvedNodeDir
+      ? `${resolvedNodeDir}:${VENV_BIN}:/usr/local/bin:/usr/bin:/bin`
+      : `${VENV_BIN}:/usr/local/bin:/usr/bin:/bin`,
+    ...(resolvedNodeBin ? { HERMES_NODE: resolvedNodeBin } : {}),
+    HERMES_TUI_DIR: TUI_DIR,
     GATEWAY_ALLOW_ALL_USERS: "true",
     API_SERVER_ENABLED: "true",
     API_SERVER_PORT:   "8642",
@@ -1265,10 +1351,12 @@ async function getStatus() {
   }
 
   // 先检测端口是否在监听（Dashboard 内部重启时 gateway 可能在 Dashboard 进程里，PID 文件不更新）
-  const gwPortAlive = await portAlive(GATEWAY_PORT);
-  
+  // 8642 为非 HTTP 内部端口，优先用 /proc 的 LISTEN 判据，HTTP 探活作兜底
+  const gwListening = isPortListening(GATEWAY_PORT);
+  const gwPortAlive = gwListening || await portAlive(GATEWAY_PORT);
+
   if (!gp) {
-    const found = findPidByCmd("hermes gateway run");
+    const found = findGatewayPid();
     if (found) {
       writeFileSync(PID_GATEWAY, String(found), "utf8");
       log(`Gateway 运行中 pid=${found}`);
@@ -1292,8 +1380,10 @@ async function getStatus() {
   let gwHealthy = false;
   let dbHealthy = false;
 
-  // 健康检查：有 PID 或端口在监听时都检查
-  if (gp || gwPortAlive) {
+  // 健康检查：TCP 处于 LISTEN 即视为健康（8642 非 HTTP，OPTIONS 探测不可靠，仅作兜底）
+  if (gwListening) {
+    gwHealthy = true;
+  } else if (gp || gwPortAlive) {
     try {
       const r = await fetch(`http://localhost:${GATEWAY_PORT}/`, {
         method: "OPTIONS",
@@ -1340,6 +1430,16 @@ async function getStatus() {
   };
 }
 
+// 网关重启完成判定：无 systemd 环境下 `hermes gateway restart` 进程会转为常驻网关永不退出，
+// 官方 get_action_status 仅凭该进程是否退出判定完成，导致前端「重启中」永不结束。
+// 记录最近一次重启请求时刻，配合端口健康检查在代理层收尾该状态。
+const RESTART_SETTLE_MS = 6000;
+let lastGatewayRestartTs = 0;
+// 按 pid 记录首次观测到 gateway-restart 进程处于 running 的时刻。
+// 不依赖重启请求是否经代理、也不依赖日志时间戳解析，避免 monitor 重启、
+// 或日志被常驻网关写满截断时 settle 永不触发导致「重启中」卡死。
+let restartFirstSeen = { pid: 0, ts: 0 };
+
 async function proxyDashboard(req) {
   const url     = new URL(req.url);
   // req.url 仍含 BASE_PATH 前缀（handleFetch 只剥了 path 变量），需先去掉
@@ -1349,6 +1449,14 @@ async function proxyDashboard(req) {
   const target  = `http://${DASHBOARD_BIND}:${DASHBOARD_PORT}${subPath}${url.search}`;
 
   const prefix = `${BASE_PATH || ""}/proxy/dashboard`;
+
+  // 记录网关重启请求时刻 + 重启前的网关 pid：既用于后续判定重启是否已实际完成，
+  // 也用于检测官方复用守卫是否发生「未真正重启」的空操作（返回 pid == 重启前 pid）。
+  let restartPreGwPid = 0;
+  if (req.method === "POST" && subPath === "/api/gateway/restart") {
+    lastGatewayRestartTs = Date.now();
+    restartPreGwPid = findGatewayPid() || 0;
+  }
 
   try {
     const headers = new Headers(req.headers);
@@ -1375,6 +1483,87 @@ async function proxyDashboard(req) {
     }
 
     const contentType = respHeaders.get("content-type") || "";
+
+    // ── 网关重启 POST：修复官方复用守卫导致的「连续第二次重启空操作」 ──
+    // 无 systemd 下 `hermes gateway restart` 进程(P1)杀旧网关后自身转为常驻网关不退出，
+    // 官方 _spawn_gateway_restart 的复用守卫见 P1 仍存活便直接 return existing(空操作)，
+    // 返回的 pid 即当前在跑的网关本体 → 第二次重启根本没重启、动作日志无新输出，
+    // 前端永久卡在「重启中/等待输出…」。检测到返回 pid == 重启前网关 pid（即未真正重启）时，
+    // 杀掉旧网关并重发一次，迫使官方 spawn 出真正的新 restart 进程。monitor 无自动重生
+    // 循环（网关仅由 /api/start、/api/restart 显式启动），故此处杀进程不会与 monitor 抢占冲突。
+    if (req.method === "POST" && subPath === "/api/gateway/restart") {
+      let bodyText = await upstream.text();
+      try {
+        const j = JSON.parse(bodyText);
+        const rpid = Number(j && j.pid) || 0;
+        if (rpid && restartPreGwPid && rpid === restartPreGwPid && isPortListening(GATEWAY_PORT)) {
+          log(`[restart] 官方复用旧网关进程 pid=${rpid}(未真正重启)，杀掉后强制重发重启`);
+          try { process.kill(rpid, "SIGTERM"); } catch {}
+          // 以端口是否仍在 LISTEN 判断旧网关是否已退出（比 pidAlive 更可靠：
+          // 进程成为 zombie 时 kill(pid,0) 仍返回存活，会误判）。
+          const deadline = Date.now() + 3000;
+          while (isPortListening(GATEWAY_PORT) && Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 100));
+          }
+          if (isPortListening(GATEWAY_PORT)) {
+            try { process.kill(rpid, "SIGKILL"); } catch {}
+            await new Promise(r => setTimeout(r, 300));
+          }
+          // 旧进程已退出，官方复用守卫的 poll() 将失效 → 重发触发真正的新 restart
+          restartFirstSeen = { pid: 0, ts: 0 };
+          lastGatewayRestartTs = Date.now();
+          const rh = new Headers(req.headers);
+          rh.delete("host");
+          try {
+            const up2 = await fetch(target, { method: "POST", headers: rh, signal: AbortSignal.timeout(10000) });
+            bodyText = await up2.text();
+            log(`[restart] 已强制重发重启，官方应 spawn 新 gateway restart 进程`);
+          } catch (e) {
+            log(`[restart] 强制重发重启失败：${e?.message || e}`);
+          }
+        }
+      } catch {}
+      respHeaders.delete("content-length");
+      respHeaders.set("cache-control", "no-store");
+      return new Response(bodyText, { status: upstream.status, headers: respHeaders });
+    }
+
+    // ── 网关重启 action 状态改写 ──
+    // `hermes gateway restart` 进程转为常驻网关不退出 → 官方永远回报 running:true。
+    // 重启实际已完成（距请求已过 settle 且网关端口健康）时改写为 running:false 收尾「重启中」。
+    if (req.method === "GET" && subPath === "/api/actions/gateway-restart/status") {
+      let bodyText = await upstream.text();
+      try {
+        const j = JSON.parse(bodyText);
+        if (j && j.running === true) {
+          const now = Date.now();
+          const pid = Number(j.pid) || 0;
+          // pid 变化视为新的重启进程，重新计时；常驻进程复用时沿用首次观测时刻
+          if (restartFirstSeen.pid !== pid) {
+            restartFirstSeen = { pid, ts: now };
+          }
+          // 以「用户最近一次点击重启」或「首次观测到 running」中较晚者为起点计 settle
+          const startedMs = Math.max(restartFirstSeen.ts, lastGatewayRestartTs || 0);
+          const settled = (now - startedMs) > RESTART_SETTLE_MS;
+          // 8642 为非 HTTP 内部端口，优先用 /proc 的 LISTEN 判据，HTTP 探活作兜底
+          const listening = isPortListening(GATEWAY_PORT);
+          const alive = settled && (listening || await portAlive(GATEWAY_PORT));
+          if (settled && alive) {
+            j.running = false;
+            if (j.exit_code === null || j.exit_code === undefined) j.exit_code = 0;
+            bodyText = JSON.stringify(j);
+            log(`[restart] 网关端口 ${GATEWAY_PORT} 健康且已 settle(${((now - startedMs) / 1000).toFixed(1)}s)，改写 gateway-restart 状态为完成以收尾「重启中」`);
+          } else {
+            log(`[restart] gateway-restart 仍 running：settled=${settled} listening=${listening} pid=${pid}`);
+          }
+        } else {
+          restartFirstSeen = { pid: 0, ts: 0 };
+        }
+      } catch {}
+      respHeaders.delete("content-length");
+      respHeaders.set("cache-control", "no-store");
+      return new Response(bodyText, { status: upstream.status, headers: respHeaders });
+    }
 
     // ── CSS 响应：改写 url(/...) 加前缀，让字体等 url() 引用能正确路由 ──
     if (contentType.includes("text/css") || subPath.endsWith(".css")) {
@@ -1487,19 +1676,80 @@ async function proxyDashboard(req) {
   if(_ld&&_ld.set){var _ls=_ld.set,_lg=_ld.get;Object.defineProperty(_lp,"href",{get:function(){return _lg?_lg.call(this):undefined;},set:function(v){if(typeof v==="string"&&v.charAt(0)==="/"&&v.indexOf(P)!==0)v=P+v;_ls.call(this,v);},configurable:true,enumerable:_ld.enumerable});}
   /* ── hook WebSocket：给 dashboard WS URL 加前缀，路由到 monitor 反代 ── */
   var _WS=window.WebSocket;
+  /* iOS 第三方输入法(如百度)在 xterm 终端无法输入的补偿所需：
+     捕获 /api/pty 连接并包裹其 send 以记录 xterm 实际发出的输入 */
+  var _activePty=null, _ptySent=[];
+  function _hookPty(sock, pathname){
+    try{
+      if(!sock||!pathname||pathname.indexOf("/api/pty")===-1)return sock;
+      _activePty=sock;
+      var _os=sock.send;
+      sock.send=function(d){
+        try{
+          var s=(typeof d==="string")?d:(d?new TextDecoder().decode(d):"");
+          if(s){_ptySent.push({t:Date.now(),s:s});if(_ptySent.length>80)_ptySent.shift();}
+        }catch(e){}
+        return _os.apply(this,arguments);
+      };
+      sock.addEventListener("close",function(){if(_activePty===sock)_activePty=null;});
+    }catch(e){}
+    return sock;
+  }
   window.WebSocket=function(url,protocols){
     try{
       if(typeof url==="string"){
         var u=new URL(url,location.origin);
         if(u.pathname.charAt(0)==="/"&&u.pathname.indexOf(P)!==0){
           var newUrl=(location.protocol==="https:"?"wss:":"ws:")+"//"+location.host+P+u.pathname+(u.search||"")+(u.hash||"");
-          return new _WS(newUrl,protocols);
+          return _hookPty(new _WS(newUrl,protocols),u.pathname);
         }
+        return _hookPty(new _WS(url,protocols),u.pathname);
       }
     }catch(e){}
     return new _WS(url,protocols);
   };
   window.WebSocket.prototype=_WS.prototype;
+  /* 关键：保留构造器静态常量（CONNECTING/OPEN/CLOSING/CLOSED）。
+     dashboard 前端发送输入前常用 ws.readyState===WebSocket.OPEN 做门禁；
+     覆盖构造器若丢掉这些常量，OPEN 变 undefined → 门禁永不成立 → 输入帧发不出去
+     （服务端推来的输出仍走 onmessage，故表现为“画面能显示、但无法输入/发送”）。 */
+  window.WebSocket.CONNECTING=_WS.CONNECTING;
+  window.WebSocket.OPEN=_WS.OPEN;
+  window.WebSocket.CLOSING=_WS.CLOSING;
+  window.WebSocket.CLOSED=_WS.CLOSED;
+  /* ── iOS 第三方输入法(百度等)组合输入补偿 ──
+     现象：iPhone 上用第三方 IME 在 Dashboard 终端(xterm)对话打不出字，自带键盘正常。
+     根因：部分第三方 IME 的组合提交未触发 xterm 期望的事件序列，组合文字从不经
+     /api/pty 发出。这里在组合结束/插入后核对：若该文字未被 xterm 经 pty socket 发出，
+     则由我们补发到 /api/pty（服务端 pty_ws 同时接受 text/bytes 帧，text 按 UTF-8 编码）。
+     去重：仅当“事件发生之后”pty 未发出该文字才补发；xterm 正常处理会在事件后立即发出，
+     且我们自己的补发也会被记录，天然避免重复；不同次提交按时间戳区分，允许连续重复字。 */
+  function _isTermTarget(t){
+    try{return !!(t&&((t.classList&&t.classList.contains("xterm-helper-textarea"))||(t.closest&&t.closest(".xterm"))));}
+    catch(e){return false;}
+  }
+  function _ptyReconcileSend(text,mark){
+    if(!text||!_activePty||_activePty.readyState!==1)return;
+    setTimeout(function(){
+      try{
+        if(!_activePty||_activePty.readyState!==1)return;
+        var after="";
+        for(var i=0;i<_ptySent.length;i++){if(_ptySent[i].t>=mark-5)after+=_ptySent[i].s;}
+        if(after.indexOf(text)!==-1)return;   /* xterm 已发出，勿重复 */
+        _activePty.send(text);
+      }catch(e){}
+    },80);
+  }
+  document.addEventListener("compositionend",function(ev){
+    try{if(ev&&ev.data&&_isTermTarget(ev.target))_ptyReconcileSend(String(ev.data),Date.now());}catch(e){}
+  },true);
+  document.addEventListener("input",function(ev){
+    try{
+      if(!ev||ev.isComposing||!ev.data||!_isTermTarget(ev.target))return;
+      if(ev.inputType&&ev.inputType!=="insertText"&&ev.inputType!=="insertCompositionText")return;
+      _ptyReconcileSend(String(ev.data),Date.now());
+    }catch(e){}
+  },true);
 })();
 <\/script>`;
 
@@ -2786,6 +3036,7 @@ async function handleFetch(req) {
   if (path.startsWith("/proxy/dashboard")) {
     const subPath = path.replace(/^\/proxy\/dashboard/, "") || "/";
     if (subPath.includes("..")) return new Response("Forbidden", { status: 403 });
+
     // Dashboard 未运行时直接返回 503，不进入 proxy 避免打错误日志
     if (!readPid(PID_DASHBOARD)) {
       return new Response(JSON.stringify({ error: "Dashboard is not running" }), {

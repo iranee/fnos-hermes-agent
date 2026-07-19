@@ -109,6 +109,192 @@ ensure_uv() {
 }
 
 # ---------------------------------------------------------------------------
+# 在线下载 Node.js v22 运行时（对话增强功能，失败不影响主安装）
+# ---------------------------------------------------------------------------
+ensure_node() {
+    local NODE_DIR="${DATA_DIR}/node/bin"
+    local NODE_BIN="${NODE_DIR}/node"
+
+    # 幂等：已存在且可执行则跳过
+    if [ -x "${NODE_BIN}" ]; then
+        log_msg "node found: ${NODE_BIN} ($("${NODE_BIN}" --version 2>/dev/null || echo 'unknown'))"
+        return 0
+    fi
+
+    # 架构映射
+    local ARCH
+    case "$(uname -m)" in
+        x86_64)        ARCH="x64" ;;
+        aarch64|arm64) ARCH="arm64" ;;
+        *)
+            log_msg "WARNING: unsupported arch $(uname -m) for node download, skipping"
+            return 0
+            ;;
+    esac
+
+    # 使用已知稳定的 Node v22 LTS 版本号常量（避免在线解析目录列表）
+    # v22.16.0 — 2025-05 发布的长期支持版，经生产验证
+    # 选 .tar.gz 格式确保设备无 xz 工具也能解包
+    local NODE_VER="v22.16.0"
+    local TARBALL="node-${NODE_VER}-linux-${ARCH}.tar.gz"
+    local MIRROR_URL="https://npmmirror.com/mirrors/node/${NODE_VER}/${TARBALL}"
+    local OFFICIAL_URL="https://nodejs.org/dist/${NODE_VER}/${TARBALL}"
+
+    log_msg ">>> 正在下载 Node.js ${NODE_VER} (${ARCH}) ..."
+
+    # ── 非致命下载：子 shell 内执行，exit 1 仅退出子 shell；|| true 规避 ERR trap ──
+    (
+        set +e
+        TMP_DIR="$(mktemp -d)"
+        DL_PATH="${TMP_DIR}/${TARBALL}"
+        DL_OK=false
+
+        # 优先国内镜像（npmmirror）
+        log_msg "mirror: ${MIRROR_URL}"
+        if curl -L --retry 3 --retry-delay 3 --connect-timeout 15 --progress-bar \
+             -o "${DL_PATH}" "${MIRROR_URL}" 2>&1 && [ -s "${DL_PATH}" ]; then
+            DL_OK=true
+        else
+            # 兜底官方源
+            log_msg "mirror failed, trying official: ${OFFICIAL_URL}"
+            if curl -L --retry 3 --retry-delay 5 --connect-timeout 15 --progress-bar \
+                 -o "${DL_PATH}" "${OFFICIAL_URL}" 2>&1 && [ -s "${DL_PATH}" ]; then
+                DL_OK=true
+            fi
+        fi
+
+        if [ "${DL_OK}" != "true" ]; then
+            log_msg "WARNING: node download failed, skipping"
+            rm -rf "${TMP_DIR}"
+            exit 1
+        fi
+
+        # 解包 .tar.gz
+        if ! tar xzf "${DL_PATH}" -C "${TMP_DIR}" 2>>"${LOG_FILE}"; then
+            log_msg "WARNING: node tarball extraction failed, skipping"
+            rm -rf "${TMP_DIR}"
+            exit 1
+        fi
+
+        # 从解包目录复制 node 二进制
+        EXTRACTED_DIR="${TMP_DIR}/node-${NODE_VER}-linux-${ARCH}"
+        if [ ! -f "${EXTRACTED_DIR}/bin/node" ]; then
+            log_msg "WARNING: node binary not found in extracted dir, skipping"
+            rm -rf "${TMP_DIR}"
+            exit 1
+        fi
+
+        mkdir -p "${NODE_DIR}"
+        cp "${EXTRACTED_DIR}/bin/node" "${NODE_BIN}"
+        chmod +x "${NODE_BIN}"
+        rm -rf "${TMP_DIR}"
+    ) || true
+
+    # 验证最终结果
+    if [ -x "${NODE_BIN}" ]; then
+        log_msg "node installed: ${NODE_BIN} ($("${NODE_BIN}" --version 2>/dev/null || echo '${NODE_VER}'))"
+    else
+        log_msg "WARNING: node 下载/安装未成功，对话功能可能不可用（不影响主功能）"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 从 wheel 中提取 hermes_cli/tui_dist/entry.js（对话 TUI 增强，非致命）
+# ---------------------------------------------------------------------------
+ensure_tui_bundle() {
+    # 动态定位 hermes_cli 目录（不硬编码 python 版本）
+    local HERMES_CLI_DIR
+    HERMES_CLI_DIR=$("${VENV_DIR}/bin/python3" -c "import hermes_cli,os;print(os.path.dirname(hermes_cli.__file__))" 2>/dev/null)
+    if [ -z "${HERMES_CLI_DIR}" ] || [ ! -d "${HERMES_CLI_DIR}" ]; then
+        log_msg "WARNING: cannot locate hermes_cli package dir, skipping tui_dist provisioning"
+        return 0
+    fi
+
+    local SP
+    SP=$(dirname "${HERMES_CLI_DIR}")
+    local ENTRY="${HERMES_CLI_DIR}/tui_dist/entry.js"
+
+    # 幂等：已存在则跳过
+    if [ -f "${ENTRY}" ]; then
+        log_msg "tui_dist present: ${ENTRY}"
+        return 0
+    fi
+
+    log_msg ">>> tui_dist/entry.js missing, provisioning from wheel ..."
+
+    # ── 非致命：子 shell 内执行，失败仅 WARNING ──
+    (
+        set +e
+        TMP_DIR="$(mktemp -d)"
+        WHL="${TMP_DIR}/hermes_agent.whl"
+        DL_OK=false
+
+        # --- 阿里云镜像 simple index ---
+        log_msg "querying aliyun simple index for hermes-agent wheel ..."
+        WHEEL_URL=$(curl -LsSf "https://mirrors.aliyun.com/pypi/simple/hermes-agent/" 2>>"${LOG_FILE}" \
+            | grep -o 'href="[^"]*hermes_agent-'"${HERMES_VERSION}"'-py3-none-any[^"]*' \
+            | head -1 \
+            | sed 's|^href="../../|https://mirrors.aliyun.com/pypi/|; s|#sha256=.*||')
+
+        if [ -n "${WHEEL_URL}" ]; then
+            log_msg "wheel URL (aliyun): ${WHEEL_URL}"
+            if curl -L --retry 3 --retry-delay 3 --connect-timeout 15 --progress-bar \
+                 -o "${WHL}" "${WHEEL_URL}" 2>&1 && [ -s "${WHL}" ]; then
+                DL_OK=true
+            else
+                log_msg "WARNING: aliyun wheel download failed"
+            fi
+        else
+            log_msg "WARNING: aliyun simple index query returned no py3-none-any wheel"
+        fi
+
+        # --- 兜底：官方 PyPI ---
+        if [ "${DL_OK}" != "true" ]; then
+            log_msg "trying official PyPI simple index ..."
+            WHEEL_URL=$(curl -LsSf "https://pypi.org/simple/hermes-agent/" 2>>"${LOG_FILE}" \
+                | grep -o 'href="[^"]*hermes_agent-'"${HERMES_VERSION}"'-py3-none-any[^"]*' \
+                | head -1 \
+                | sed 's|#sha256=.*||')
+
+            if [ -n "${WHEEL_URL}" ]; then
+                log_msg "wheel URL (pypi): ${WHEEL_URL}"
+                if curl -L --retry 3 --retry-delay 5 --connect-timeout 15 --progress-bar \
+                     -o "${WHL}" "${WHEEL_URL}" 2>&1 && [ -s "${WHL}" ]; then
+                    DL_OK=true
+                else
+                    log_msg "WARNING: official PyPI wheel download failed"
+                fi
+            else
+                log_msg "WARNING: official PyPI query returned no py3-none-any wheel"
+            fi
+        fi
+
+        if [ "${DL_OK}" != "true" ]; then
+            log_msg "WARNING: cannot obtain hermes-agent wheel, tui_dist not provisioned"
+            rm -rf "${TMP_DIR}"
+            exit 1
+        fi
+
+        # 从 wheel 中解压 tui_dist 目录到 site-packages
+        log_msg "extracting hermes_cli/tui_dist/* from wheel ..."
+        if ! unzip -o "${WHL}" "hermes_cli/tui_dist/*" -d "${SP}" >>"${LOG_FILE}" 2>&1; then
+            log_msg "WARNING: unzip tui_dist from wheel failed"
+            rm -rf "${TMP_DIR}"
+            exit 1
+        fi
+
+        rm -rf "${TMP_DIR}"
+    ) || true
+
+    # 验证最终结果
+    if [ -f "${ENTRY}" ]; then
+        log_msg "tui_dist/entry.js provisioned: ${ENTRY}"
+    else
+        log_msg "WARNING: tui_dist/entry.js 未能补齐，对话功能可能不可用（不影响主功能）"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # 1. 创建数据目录
 # ---------------------------------------------------------------------------
 log_msg "Creating data directories under ${DATA_DIR} ..."
@@ -195,6 +381,16 @@ if [ -x "${UV_BIN}/uv" ] && [ -d "${VENV_DIR}/bin" ]; then
         log_msg "WARNING: uv symlink into venv/bin failed"
     fi
 fi
+
+# ---------------------------------------------------------------------------
+# 3.5 下载 Node.js 运行时（对话增强，非致命）
+# ---------------------------------------------------------------------------
+ensure_node
+
+# ---------------------------------------------------------------------------
+# 3.6 补齐 tui_dist/entry.js（对话 TUI 增强，非致命）
+# ---------------------------------------------------------------------------
+ensure_tui_bundle
 
 # ---------------------------------------------------------------------------
 # 4. 部署 prompts

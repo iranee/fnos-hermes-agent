@@ -19,7 +19,7 @@ export const PROVIDER_PRESETS = {
   "ollama-cloud":    { name: "Ollama Cloud",   base_url: "https://ollama.com/v1" },
   "lmstudio":        { name: "LM Studio",      base_url: "http://localhost:1234/v1" },
   "alibaba":         { name: "通义千问",        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
-  // ── Hermes 内置 api_key 类新增商（权威值取自 auth.py PROVIDER_REGISTRY）iranee ──
+  // ── Hermes 内置 api_key 类新增商（权威值取自 auth.py PROVIDER_REGISTRY） ──
   "stepfun":             { name: "StepFun Step Plan",          base_url: "https://api.stepfun.ai/step_plan/v1" },
   "arcee":               { name: "Arcee AI",                   base_url: "https://api.arcee.ai/api/v1" },
   "gmi":                 { name: "GMI Cloud",                  base_url: "https://api.gmi-serving.com/v1" },
@@ -67,7 +67,7 @@ export const PROVIDER_MODELS = {
     "google/gemini-3.1-pro-preview", "deepseek/deepseek-v4-pro",
   ],
   "xai": [
-    // P3：清理 xAI 2026-05-15 已下线的 grok-4.1-fast 家族，补当前主力 grok-4.20。iranee
+    // P3：清理 xAI 2026-05-15 已下线的 grok-4.1-fast 家族，补当前主力 grok-4.20。
     "grok-4.5", "grok-4.3", "grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning",
   ],
   "mistral": [
@@ -81,7 +81,7 @@ export const PROVIDER_MODELS = {
   "alibaba": [
     "qwen-plus", "qwen-max", "qwen3.5-plus", "qwen3-max-2026-01-23", "qwen3-coder-next",
   ],
-  // ── Hermes 内置 api_key 类新增商（模型取自 hermes_cli/models.py）iranee ──
+  // ── Hermes 内置 api_key 类新增商（模型取自 hermes_cli/models.py） ──
   "stepfun": [
     "step-3.5-flash", "step-3.5-flash-2603",
   ],
@@ -116,7 +116,7 @@ export const PROVIDER_API_KEYS = {
   "mistral": "MISTRAL_API_KEY",     "nvidia": "NVIDIA_API_KEY",
   "huggingface": "HF_TOKEN",        "ollama-cloud": "OLLAMA_API_KEY",
   "ollama-local": "OLLAMA_LOCAL_API_KEY", "lmstudio": "LMSTUDIO_API_KEY", "alibaba": "DASHSCOPE_API_KEY",
-  // ── Hermes 内置 api_key 类新增商（主 env 取自 auth.py api_key_env_vars）iranee ──
+  // ── Hermes 内置 api_key 类新增商（主 env 取自 auth.py api_key_env_vars） ──
   "stepfun": "STEPFUN_API_KEY",     "arcee": "ARCEEAI_API_KEY",
   "gmi": "GMI_API_KEY",             "kilocode": "KILOCODE_API_KEY",
   "alibaba-coding-plan": "ALIBABA_CODING_PLAN_API_KEY",
@@ -125,10 +125,10 @@ export const PROVIDER_API_KEYS = {
 
 // ── A/B 分类（Sam 任务16 决策表）─────────────────────────────────────
 // A 类：仅写 model 段，端点与原生协议交给 Hermes 内置 PROVIDER_REGISTRY 处理；
-// B 类：必须写 providers 段（base_url + api_key + default_model）。iranee
+// B 类：必须写 providers 段（base_url + api_key + default_model）。
 // 注：动态 id 约定 —— custom-*（第三方自定义商，写 providers 段含 api_key）、
 //     local-*（本地 OpenAI 兼容端点，写 providers 段仅 base_url + default_model，省略 api_key），
-//     二者均不在此表中，按“非预设”走 providers 段逻辑（详见 monitor.js customEntries）。iranee
+//     二者均不在此表中，按“非预设”走 providers 段逻辑（详见 monitor.js customEntries）。
 export const PROVIDER_CLASSES = {
   "openai": "A",         "openrouter": "A",     "anthropic": "A",
   "deepseek": "A",       "gemini": "A",         "kimi-coding": "A",
@@ -137,14 +137,14 @@ export const PROVIDER_CLASSES = {
   "huggingface": "A",    "lmstudio": "B",       "alibaba": "A",
   "siliconflow": "B",    "mistral": "B",        "ollama-cloud": "B",
   "ollama-local": "B",
-  // ── 新增商均为 Hermes 内置（A 类：只写 model 段、base_url 编辑框只读）iranee ──
+  // ── 新增商均为 Hermes 内置（A 类：只写 model 段、base_url 编辑框只读） ──
   "stepfun": "A",        "arcee": "A",          "gmi": "A",
   "kilocode": "A",       "alibaba-coding-plan": "A",  "xiaomi": "A",
   "tencent-tokenhub": "A",
 };
 
 // ── provider id → Hermes 内部 provider id 映射 ───────────────────────
-// 仅列出与自身 id 不同的项；未列出者默认使用自身 id。iranee
+// 仅列出与自身 id 不同的项；未列出者默认使用自身 id。
 export const PROVIDER_HERMES_IDS = {
   "openai": "openai-api",
 };

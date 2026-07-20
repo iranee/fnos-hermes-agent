@@ -107,6 +107,7 @@ fnOS 桌面图标 → 应用启动脚本 → Monitor (Bun, /var/apps/hermes-agen
 ![](/preview/chat.png)
 ![](/preview/list-model.png)
 ![](/preview/updote.png)
+![](/preview/dashboard-chat.png)
 
 ### QQ 交流群
 ![](/preview/qq.png)

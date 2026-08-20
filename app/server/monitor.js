@@ -1,23 +1,25 @@
 // Hermes Agent 监控服务 — Node.js HTTP 服务（Unix Socket）
 // serve() 的调用已移交 boot.js，本模块仅导出 handleServe/websocket 处理器，故不再引入 serve。
 import { file, spawn } from "./node-adapter.js";
-import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync, statSync, symlinkSync, watch, chmodSync, readdirSync } from "fs";
+import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync, statSync, symlinkSync, watch, chmodSync, readdirSync, rmSync } from "fs";
 import { randomBytes } from "crypto";
 import { networkInterfaces } from "os";
 import net from "net";
 import { spawnSync, spawn as spawnAsync } from "child_process";
-import { PROVIDER_PRESETS, PROVIDER_MODELS, PROVIDER_API_KEYS, PROVIDER_CLASSES, PROVIDER_HERMES_IDS } from "./provider-config.js";
-import { createCheckpointer, resumeStreamingMessages } from "./chat-hardening.js";
+import { PROVIDER_PRESETS, PROVIDER_MODELS, PROVIDER_API_KEYS, PROVIDER_CLASSES, PROVIDER_HERMES_IDS } from "./primary-config.js";
+import { createCheckpointer, resumeStreamingMessages } from "./primary-config.js";
 import { initChannels, handleGetChannels, handleSaveChannel, handleToggleChannel, handleWeixinQr, handleWeixinQrStatus, handleWeixinSave, handleTelegramQr, handleTelegramQrStatus, handleTelegramQrApply, handleWhatsAppQr, handleWhatsAppQrStatus, handleWhatsAppQrApply } from "./channels.js";
-import { toolDisplayName, toolEmoji } from "./tool-names.js";
-import { parseFallback, syncFallbackKeysToHermesEnv } from "./fallback-config.js";
-import { detectApiFormat, probeApiFormat, apiModeForFormat, normalizeApiFormat } from "./api-format.js";
+import { toolDisplayName, toolEmoji } from "./primary-config.js";
+import { parseFallback, buildFallbackBlock, applyFallbackToYaml, syncFallbackKeysToHermesEnv } from "./primary-config.js";
+import { detectApiFormat, probeApiFormat, apiModeForFormat, normalizeApiFormat } from "./primary-config.js";
 import { initDashboard, DEFAULT_DASHBOARD_PORT, ALTERNATE_DASHBOARD_PORT, spawnDashboard, handleDashboardStart, handleDashboardStop, checkDashboardHealth, handleDashboardHttp, matchDashboardWsPath, upgradeDashboardWs, handleDashboardWsOpen, handleDashboardWsMessage, handleDashboardWsClose } from "./dashboard.js";
 import { initPrimaryConfig, resolveRealApiKey, loadProvidersState, writeProvidersState, writeConfigYaml, saveProviderKeysToEnv, syncActiveKeyToHermesEnv, cleanupRemovedProviderKeys, resolveBridgePrimary } from "./primary-config.js";
 import { createBridgeKeeper } from "./bridge-keeper.js";
-import { createUpdateChecker, compareVersions } from "./update-check.js";
+// 应用包版本信息查询（整合自 update-check.js 和 update-fpk.js；自动升级链路已移除，仅保留只读查询）
+import { checkLatestVersion, createUpdateChecker } from "./update-fpk.js";
+import { compareVersions } from "./update-fpk.js";
 import { fileURLToPath } from "url";
-import pathModule from "path";
+import pathModule, { dirname, join } from "path";
 
 // 动态检测当前运行路径 - 完全不使用硬编码的盘符或路径
 const ENV_APP_DIR   = process.env.APP_DIR;
@@ -36,21 +38,82 @@ if (ENV_APP_DIR) {
 } else {
   // 从当前 monitor.js 所在的文件路径自动推导 APP_DIR
   // __dirname 是 monitor.js 所在目录，即 <APP_DIR>/server
-  try {
-    const os = require('os');
-    const pathModule = os.platform() === 'win32' ? require('path') : require('path').posix;
-    
-    // __dirname 通常是 "/volX/@appcenter/hermes-agent/server" 或 "/var/apps/hermes-agent/target/server"
-    const currentDir = __dirname; // e.g., "/vol1/@appcenter/hermes-agent/server"
-    const parentDir = pathModule.dirname(currentDir); // e.g., "/vol1/@appcenter/hermes-agent"
-    
-    APP_DIR = parentDir;
-  } catch (e) {
-    console.error(`[路径探测] 无法自动推导 APP_DIR: ${e.message}`);
-    // 最后退路：从环境变量或系统默认路径尝试
-    APP_DIR = process.env.APP_DIR || "/vol1/@appcenter/hermes-agent";
-  }
+  // ESM 中 require 不可用，__dirname 已通过 fileURLToPath + pathModule.dirname 计算
+  APP_DIR = pathModule.dirname(__dirname);
 }
+
+console.log(`[初始化] APP_DIR=${APP_DIR}`);
+
+// 从 manifest 动态读取应用版本号（基于包升级模式），支持多层 fallback
+function readAppVersion() {
+  const MANIFEST_FILE = `${APP_DIR}/manifest`;  // APP_DIR 此时已确定
+  const candidates = [
+    MANIFEST_FILE,                            // Priority 1: main manifest (package-based)
+    "/var/apps/hermes-agent/manifest",        // Priority 2: system path
+    `${process.cwd()}/manifest`,              // Priority 3: cwd
+  ];
+  
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    candidates.push(join(here, "../../manifest"));
+    candidates.push(join(here, "../manifest"));
+  } catch {}
+  
+  let firstFailedPath = null;
+  for (const fp of candidates) {
+    try {
+      const txt = readFileSync(fp, "utf8");
+      const m = txt.match(/^version\s*=\s*(\S+)/m);
+      if (m) {
+        const v = m[1].trim();
+        if (v && v !== "unknown") {
+          log(`[版本读取] ${fp} → ${v}`);
+          return v;
+        }
+      } else if (!firstFailedPath) {
+        firstFailedPath = fp;  // 记录第一个失败的路径
+      }
+    } catch (e) {
+      if (!firstFailedPath) firstFailedPath = fp;  // 记录第一个失败的路径
+    }
+  }
+  
+  // 只输出一次失败的提示
+  if (firstFailedPath) {
+    log(`[版本读取] 尝试了多个路径但都失败`);
+  }
+  return "unknown";
+}
+
+let APP_VERSION;
+
+function reloadAppVersion() {
+  APP_VERSION = readAppVersion();
+  log(`[版本重载] manifest 重新读取：${APP_VERSION}`);
+  return APP_VERSION;
+}
+
+// 读取本地应用包版本（/api/update/check 契约的 local 字段来源）：
+// 优先部署态 config/bootstrap/app-version.env（APP_VERSION=...，兼容带引号写法），
+// 回退 APP_VERSION（manifest 读取，见 readAppVersion）。合回自原 update-check.js 的 getLocalVersion 逻辑。
+function readLocalAppVersion() {
+  const envPaths = [
+    `${APP_DIR}/config/bootstrap/app-version.env`,
+    `${process.cwd()}/config/bootstrap/app-version.env`,
+  ];
+  for (const fp of envPaths) {
+    try {
+      const m = readFileSync(fp, "utf8").match(/^APP_VERSION\s*=\s*(.+)$/m);
+      if (m) {
+        const v = m[1].trim().replace(/^["']|["']$/g, "");
+        if (v && v !== "unknown") return v;
+      }
+    } catch {}
+  }
+  return APP_VERSION || "unknown";
+}
+
+
 const DATA_DIR = ENV_DATA_DIR || `${APP_DIR}/data`;
 const VAR_DIR = ENV_VAR_DIR || `${APP_DIR}/var`;
 const LOG_FILE       = `${VAR_DIR}/monitor.log`; // Monitor 自身日志（原 hermes.log，更名以便理解）
@@ -61,11 +124,29 @@ const VERSION_FILE   = `${VAR_DIR}/hermes_version.txt`;
 const START_TIME     = Date.now();
 const CONFIG_VERSION = "1.0";
 
+// 仪表盘会话令牌（与仪表盘共享，代理转发时免 401 鉴权）
+const DASHBOARD_TOKEN_FILE = `${VAR_DIR}/dashboard.token`;
+const DASHBOARD_SESSION_TOKEN = (() => {
+    try {
+        if (existsSync(DASHBOARD_TOKEN_FILE)) return readFileSync(DASHBOARD_TOKEN_FILE, "utf8").trim();
+    } catch {}
+    const t = crypto.randomUUID(); // 或 randomBytes(24).toString("hex")
+    writeFileSync(DASHBOARD_TOKEN_FILE, t, { mode: 0o600 });
+    return t;
+})();
+
 // ── Hermes 自更新状态 ──
 let updateState = "idle";       // idle | checking | updating | done | error
 let updateOutput = [];           // 最近的 stdout/stderr 输出行
 let updateExitCode = null;
 let updateProc = null;
+
+// ── Web 前端重建状态 ──
+let rebuildWebState = "idle";
+let rebuildWebOutput = [];
+let rebuildWebExitCode = null;
+let rebuildWebProc = null;
+let lastUpdateCheckResult = false; // 跟踪上次检查结果，避免重复日志
 // 获取本机 LAN IP（排除 loopback）
 function getLANIP() {
   const ifs = networkInterfaces();
@@ -136,7 +217,7 @@ if (!SOCKET_PATH) {
   process.exit(1);
 }
 const BASE_PATH      = (process.env.BASE_PATH || "").replace(/\/+$/, "");
-const STATIC_DIR     = `${APP_DIR}/ui`;
+const STATIC_DIR     = `${APP_DIR}/ui`; // 仅用于控制面板 index.html 等简单静态文件
 const VENV_BIN       = `${DATA_DIR}/venv/bin`;
 const HERMES_BIN     = `${VENV_BIN}/hermes`;
 const UV_BIN_PATH    = `${VENV_BIN}/uv`;
@@ -186,7 +267,12 @@ initDashboard({
   findGatewayPid,
   isPortListening,
   portAlive,
+  dashboardSessionToken: DASHBOARD_SESSION_TOKEN,
 });
+
+// APP_DIR 现已确定，可以安全读取 manifest 版本
+APP_VERSION = readAppVersion();
+log(`[启动检测] 应用包版本 (manifest): ${APP_VERSION}`);
 
 // ─── API Key 自动生成（12位随机字母数字）─────────────────────────────────────
 function generateApiKey() {
@@ -363,15 +449,9 @@ try {
       let firstLine = "";
       try {
         if (existsSync(HERMES_BIN_PATH)) {
-          const fs = require('fs');
-          const fileStream = fs.createReadStream(HERMES_BIN_PATH, { autoClose: true });
-          const reader = require('stream').Readable.from(fileStream);
-          const chunks = [];
-          for await (const chunk of reader) chunks.push(chunk);
-          if (chunks.length > 0) {
-            firstLine = Buffer.concat(chunks).toString('utf8').split('\n')[0];
-            log(`[版本检测] 文件第一行：${firstLine.substring(0, 50)}...`);
-          }
+          const buf = readFileSync(HERMES_BIN_PATH, { encoding: 'utf8' }).slice(0, 256);
+          firstLine = buf.split('\n')[0];
+          log(`[版本检测] 文件第一行：${firstLine.substring(0, 50)}...`);
         }
       } catch (e) {
         log(`[版本检测] 读取文件第一行失败：${e.message}`);
@@ -1042,11 +1122,15 @@ function mapBridgeToolEvent(ev) {
 
 // Bridge 轮询主循环：返回 {fullReply, hadToolCalls, aborted}
 // 失败时抛错；若错误发生前已向前端输出过内容，err.bridgeEmitted=true（调用方不得降级重放）
-async function runBridgeChat({ sessionId, message, history, instructions, signal, onDelta, onTool }) {
+async function runBridgeChat({ sessionId, message, history, instructions, signal, onDelta, onTool, model, provider }) {
   // 网页对话与网关/微信链路对齐：解析面板主模型随请求传入；
   // 解析失败/LOCAL 时为 null（不传字段，维持 bridge 默认模型行为），不阻断对话
   let primaryRuntime = null;
-  try { primaryRuntime = resolveBridgePrimary(getActiveProvider()); } catch {}
+  try { 
+    // Use reconnected model/provider if provided, otherwise resolve from active provider
+    const resolvedProvider = (model && provider) ? { name: provider, id: model } : getActiveProvider();
+    primaryRuntime = resolveBridgePrimary(resolvedProvider); 
+  } catch {}
   const started = await bridgeChat(sessionId, message, history, instructions, primaryRuntime);
   const runId = started.run_id;
   let cursor = 0;
@@ -1266,6 +1350,7 @@ function startAgentBridge() {
 const PROVIDER_TIMEOUT_MS = 300000; // 流式不活动超时：连接或相邻数据块之间超过该时长无数据才中断
 const activeChatStreams = new Map();
 const wsMessageQueue = new Map(); // session_id → message，WS 连接前暂存
+const wsQueueTimers = new Map();  // session_id → 队列清理定时器句柄（同 session 重复入队时先清旧定时器，避免误删新消息）
 
 // ─── 多会话并发运行表（任务 #8）─────────────────────────────────────────
 // session_id → 运行态条目。对话运行期间实时更新；结束后保留 TTL 供前端
@@ -1578,7 +1663,12 @@ async function runChatWS(ws, sessionId, message) {
   activeChatStreams.set(sessionId, stopCtrl);
   wsClients.set(sessionId, ws);
   let liveRunId = null; // 并发运行表条目 id（session 校验通过后登记）
-  sendJSON({ info: '正在思考…' });
+  
+  // On reconnection (message === null), resume from existing session
+  // On first connection, show "thinking" status
+  if (message !== null) {
+    sendJSON({ info: '正在思考…' });
+  }
 
   const pingTimer = setInterval(() => { try { ws.ping(); } catch {} }, 30000);
   const keepaliveTimer = setInterval(() => { try { sendJSON({ keepalive: true }); } catch {} }, 15000);
@@ -1599,13 +1689,18 @@ async function runChatWS(ws, sessionId, message) {
     // 登记并发运行表（覆盖 bridge 与 HTTP SSE 降级两条链路）
     liveRunId = liveRunStart(sessionId, message);
 
-    // 去重：防止边界情况（如并发调用）下出现重复用户消息
-    const _wsLastMsg = session.messages[session.messages.length - 1];
-    const _wsIsSameMsg = _wsLastMsg && _wsLastMsg.role === "user" &&
-      JSON.stringify(_wsLastMsg.content) === JSON.stringify(message);
-    if (!_wsIsSameMsg) {
-      session.messages.push({ role: "user", content: message, ts: Date.now() });
-      saveSession(session);
+    // On reconnection (message === null), do not add another user message
+    // Only add message if this is a fresh conversation start
+    let _wsIsSameMsg = false;
+    if (message !== null) {
+      // 去重：防止边界情况（如并发调用）下出现重复用户消息
+      const _wsLastMsg = session.messages[session.messages.length - 1];
+      _wsIsSameMsg = _wsLastMsg && _wsLastMsg.role === "user" &&
+        JSON.stringify(_wsLastMsg.content) === JSON.stringify(message);
+      if (!_wsIsSameMsg) {
+        session.messages.push({ role: "user", content: message, ts: Date.now() });
+        saveSession(session);
+      }
     }
 
     // 聊天加固：流式回复增量 checkpoint
@@ -1643,6 +1738,9 @@ async function runChatWS(ws, sessionId, message) {
           signal: stopCtrl.signal,
           onDelta: (delta) => { sendJSON({ delta }); liveRunDelta(sessionId, liveRunId, delta); ckpt.onDelta(delta); },
           onTool: (toolEvent) => { sendJSON({ tool_progress: toolEvent }); liveRunTool(sessionId, liveRunId, toolEvent); },
+          // Preserve model/provider context for reconnect scenarios
+          model: ws.data.model,
+          provider: ws.data.provider,
         });
         fullReply = r.fullReply;
         hadToolCalls = r.hadToolCalls;
@@ -1706,7 +1804,6 @@ async function runChatWS(ws, sessionId, message) {
           reader.releaseLock();
         }
 
-        if (!requestError) requestError = null;
         break;
       } catch (e) {
         const errMsg = e.message || String(e);
@@ -1753,7 +1850,8 @@ const wsHandler = {
     }
     // 聊天 WS
     const { sessionId, message } = ws.data;
-    log(`[WS] open session=${sessionId}`);
+    const isReconnect = message === null;
+    log(`[WS] open session=${sessionId}${isReconnect ? ' (reconnect)' : ''}`);
     runChatWS(ws, sessionId, message).catch(err => {
       log(`[WS] runChatWS error: ${err?.message || err}`);
       try { ws.send(JSON.stringify({ error: err?.message || "internal error", session_id: sessionId })); } catch {}
@@ -1983,6 +2081,25 @@ function spawnHermes(name, pidPath, args) {
   const logPath = `${VAR_DIR}/${name}.log`;
   try { writeFileSync(logPath, ""); } catch {}
 
+  // API Server 环境变量按进程角色分流：
+  // - gateway 进程需要 API server 绑定 GATEWAY_PORT
+  //   （GATEWAY_API=http://localhost:${GATEWAY_PORT}/v1 依赖它）；
+  // - dashboard 进程经 --host/--port 启动自身 web 服务（默认 9119），
+  //   由 monitor 的 /proxy/dashboard 反代提供服务，流量路径完全不经过
+  //   GATEWAY_PORT。若同样注入 API_SERVER_ENABLED=true + API_SERVER_PORT=
+  //   GATEWAY_PORT，dashboard 会与 gateway 抢绑同一端口 → 端口冲突 →
+  //   monitor 面板 Bad Gateway。因此 dashboard 显式禁用 API server。
+  const apiServerEnv = name === "gateway"
+    ? {
+        API_SERVER_ENABLED: "true",
+        API_SERVER_PORT:   String(GATEWAY_PORT),
+        API_SERVER_HOST:    "0.0.0.0",
+        API_SERVER_KEY:     MONITOR_TOKEN,
+      }
+    : {
+        API_SERVER_ENABLED: "false",
+      };
+
   const env = {
     ...process.env,
     HOME: DATA_DIR,
@@ -1993,16 +2110,18 @@ function spawnHermes(name, pidPath, args) {
     ...(resolvedNodeBin ? { HERMES_NODE: resolvedNodeBin } : {}),
     HERMES_TUI_DIR: TUI_DIR,
     GATEWAY_ALLOW_ALL_USERS: "true",
-    API_SERVER_ENABLED: "true",
-    API_SERVER_PORT:   String(GATEWAY_PORT),
-    API_SERVER_HOST:    "0.0.0.0",
-    API_SERVER_KEY:     MONITOR_TOKEN,
+    ...apiServerEnv,
     HERMES_YOLO_MODE:   "1",
     LITELLM_REQUEST_TIMEOUT: "600",
     REQUEST_TIMEOUT:    "600",
   };
 
   if (name === "dashboard") {
+    // 兜底清理：即使父进程（fnOS 服务环境）残留 API_SERVER_PORT/HOST 等变量，
+    // 也不允许 dashboard 进程继承后去抢 GATEWAY_PORT。
+    delete env.API_SERVER_PORT;
+    delete env.API_SERVER_HOST;
+    delete env.API_SERVER_KEY;
     // 预构建前端随包分发（app/hermes-web-dist），显式指定 HERMES_WEB_DIST 后
     // dashboard 跳过运行时 npm 构建直接 serve 静态产物（上游 main.py/web_server.py
     // 均原生支持该变量）。优先级：hermes-repo 现场构建产物（版本严格匹配）→
@@ -2013,10 +2132,12 @@ function spawnHermes(name, pidPath, args) {
                   : existsSync(`${pkgDist}/index.html`)  ? pkgDist : null;
     if (distDir) {
       env.HERMES_WEB_DIST = distDir;
-      log(`dashboard HERMES_WEB_DIST=${distDir}`);
+      log(`[dashboard] 使用预构建前端资源：${distDir}`);
     } else {
-      log(`dashboard 未找到可用 web dist（repo 与随包均缺失），将依赖上游运行时构建`);
+      log(`[dashboard] 未找到可用 web dist（repo 与随包均缺失），将依赖上游运行时构建`);
     }
+    // 传递 WebSocket Token 给 Dashboard 进程
+    env.HERMES_DASHBOARD_SESSION_TOKEN = DASHBOARD_SESSION_TOKEN;
   }
 
   const p = spawn({
@@ -2146,7 +2267,9 @@ async function getStatus() {
   } catch {}
 
   return {
-    gateway:   { running: gwRunning, healthy: gwHealthy, pid: gp, port: GATEWAY_PORT, crash_loop: gatewayCrashLoop, version: HERMES_VERSION },
+    // version = hermes 引擎版本（基线语义）；app_version = 应用包版本（启动时缓存于 APP_VERSION，
+    // 避免每次轮询 /api/status 都同步读多个 manifest 候选文件并在设备端刷失败日志）
+    gateway:   { running: gwRunning, healthy: gwHealthy, pid: gp, port: GATEWAY_PORT, crash_loop: gatewayCrashLoop, version: HERMES_VERSION, hermes: HERMES_VERSION, app_version: readLocalAppVersion() },
     dashboard: { running: dbRunning, healthy: dbHealthy, pid: dp, port: DASHBOARD_PORT },
     lastLog,
   };
@@ -2272,7 +2395,7 @@ bridgeKeeper = createBridgeKeeper({
 });
 bridgeKeeper.startHealthLoop();
 
-// 应用包版本更新检查器（/api/update/check 用，实时查询 GitHub，仅失败态短缓存）
+// 应用包版本更新检查器（/api/update/check 用，实时查询 GitHub，仅成功结果缓存 5 分钟、失败态不缓存）
 const appUpdateChecker = createUpdateChecker({ appDir: APP_DIR, log, cacheFile: `${VAR_DIR}/update-latest.txt` });
 
 // ─── 请求处理器 ─────────────────────────────────────────────────────────
@@ -2304,7 +2427,7 @@ async function handleFetch(req) {
   });
 
   // 需要令牌的变更操作（仅写操作，GET 不需要 token）
-  const writePaths = ["/api/start", "/api/stop", "/api/restart", "/api/dashboard/start", "/api/dashboard/stop", "/api/config", "/api/config/test", "/api/config/detect-format", "/api/hermes/update", "/api/logs/clear"];
+  const writePaths = ["/api/start", "/api/stop", "/api/restart", "/api/dashboard/start", "/api/dashboard/stop", "/api/config", "/api/config/test", "/api/config/detect-format", "/api/hermes/update", "/api/hermes/rebuild-web", "/api/logs/clear"];
   const isWrite = ["POST", "PUT", "DELETE"].includes(req.method);
   if (isWrite && (writePaths.includes(path) || path.startsWith("/api/channels/")) && !checkToken(req)) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
@@ -2382,13 +2505,191 @@ async function handleFetch(req) {
     }), { headers: jsonHeaders() });
   }
 
-  // ── 应用包版本更新检查（模块内实时查询 + 失败短缓存，绝不 500）──
-  // force=1 时连失败缓存也绕过，强制从 GitHub 获取最新发布
+  // ── 应用包版本更新检查（前端契约：{ ok, local, latest|null, has_update, error? }）──
+  // local 来自 config/bootstrap/app-version.env（回退 manifest）；
+  // latest 来自 GitHub Releases（update-fpk.js checkLatestVersion，失败时 latest=null + error 降级，绝不 500）
+  // force=1 时前端语义为强制刷新（跳过成功结果的 5 分钟缓存，重新查询 GitHub）
   if (path === "/api/update/check") {
-    const force = url.searchParams.get("force") === "1";
-    const payload = await appUpdateChecker.check({ force });
+    const local = readLocalAppVersion();
+    let latest = null;
+    let error = null;
+    try {
+      const r = await appUpdateChecker.check({ force: url.searchParams.get("force") === "1" });
+      if (r && r.ok && r.latest) {
+        latest = r.latest;
+      } else if (r && !r.ok) {
+        error = r.error || "fetch_failed";
+      } else {
+        error = "fetch_failed";
+      }
+    } catch (e) {
+      error = e?.message || "fetch_failed";
+    }
+    const has_update = !!(latest && latest !== "unknown" && local && local !== "unknown" && compareVersions(latest, local) > 0);
+    const payload = { ok: true, local, latest, has_update, checked_at: Date.now() };
+    if (error) payload.error = error;
     return new Response(JSON.stringify(payload), { headers: { ...jsonHeaders(), "Cache-Control": "no-store" } });
   }
+
+  // ── 应用包更新检查（/api/app/update/check）────────────────────────────
+  // 返回完整版本信息：当前版本、最新版本、更新可用性、下载链接、发布时间等
+  if (path === "/api/app/update/check") {
+    try {
+      const GITHUB_REPO = process.env.GITHUB_REPO || "iranee/fnos-hermes-agent";
+      const headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "fnos-hermes-agent"
+      };
+
+      // 优先按 published_at 取最新已发布 release
+      async function fetchLatestPublishedRelease() {
+        const r = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=30`, {
+          signal: AbortSignal.timeout(15000),
+          headers
+        });
+        if (!r.ok) return { data: null, status: r.status };
+        const list = await r.json();
+        const published = (Array.isArray(list) ? list : []).filter(x => !x.draft && x.published_at);
+        if (!published.length) return { data: null, status: r.status };
+        published.sort((a, b) => String(b.published_at).localeCompare(String(a.published_at)));
+        return { data: published[0], status: r.status };
+      }
+
+      let { data, status: firstStatus } = await fetchLatestPublishedRelease();
+      let rateLimited = false;
+      if (!data && (firstStatus === 401 || firstStatus === 403)) {
+        rateLimited = true;
+      }
+
+      // 兜底：未认证或没有 release 时尝试 /releases/latest
+      if (!data && !rateLimited) {
+        const r = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
+          signal: AbortSignal.timeout(15000),
+          headers
+        });
+        if (r.ok) {
+          data = await r.json();
+        } else if (r.status === 401 || r.status === 403) {
+          rateLimited = true;
+        } else {
+          throw new Error(`GitHub API ${r.status}`);
+        }
+      }
+
+      if (rateLimited && !data) {
+        const currentVer = readLocalAppVersion();
+        return new Response(JSON.stringify({
+          current: currentVer,
+          latest: currentVer,
+          updateAvailable: false,
+          rateLimited: true,
+          hint: "GitHub API 请求被限流（403），请稍后重试",
+          repo: GITHUB_REPO
+        }), { headers: jsonHeaders() });
+      }
+
+      if (!data || !data.tag_name) {
+        throw new Error("GitHub API 未返回 release 信息");
+      }
+
+      const tag = String(data.tag_name || "");
+      const latest = tag.replace(/^fnos-hermes-agent_v|^v/, "").trim() || "unknown";
+      // current 与 /api/update/check 同源：app-version.env 优先、manifest 回退
+      // （manifest 不部署到设备端，直接读 APP_VERSION 会得到 unknown 导致 updateAvailable 恒 false）
+      const current = readLocalAppVersion();
+      const updateAvailable = latest !== "unknown" && compareVersions(latest, current) > 0;
+
+      // 提取 .fpk 安装包直链，优先匹配 no_trimcli 版本（兼容 _no_trimcli 与 _no-trimcli 两种产物命名）
+      let download_url = "";
+      if (Array.isArray(data.assets)) {
+        // 先查找 no_trimcli 版本（下划线/连字符命名均匹配）
+        const noTrimCliAsset = data.assets.find(a => /[_-]no[-_]trimcli\.fpk$/i.test(a.name || ""));
+        if (noTrimCliAsset && noTrimCliAsset.browser_download_url) {
+          download_url = noTrimCliAsset.browser_download_url;
+        } else {
+          // 如果没有 no_trimcli，查找其他 .fpk 文件
+          const asset = data.assets.find(a => /\.fpk$/i.test(a.name || ""));
+          if (asset && asset.browser_download_url) download_url = asset.browser_download_url;
+        }
+      }
+
+      // 仅在检测新版本或异常时打印日志
+      if (updateAvailable && !lastUpdateCheckResult) {
+        log(`[更新检查] 发现新版本：current=${current}, latest=${latest}`);
+      } else if (!download_url) {
+        log(`[更新检查] 警告：未找到 .fpk 安装包下载链接`);
+      }
+      lastUpdateCheckResult = updateAvailable;
+
+      return new Response(JSON.stringify({
+        current,
+        latest,
+        updateAvailable,
+        html_url: data.html_url || "",
+        download_url,
+        published_at: data.published_at || "",
+        body: data.body || "",
+        repo: GITHUB_REPO
+      }), { headers: jsonHeaders() });
+    } catch (e) {
+      return new Response(JSON.stringify({ error: e.message || String(e) }), {
+        status: 502, headers: jsonHeaders()
+      });
+    }
+  }
+
+  // ── FPK 版本信息查询（手动下载模式）─────────────────────────────
+  // GET  /api/app/update/latest → 只读：最新版本 + 下载链接（不触发任何安装）
+  // 自动升级链路已移除：POST /api/app/update/auto、GET /api/app/update/status、
+  // POST /api/app/install/manual 均返回 410 Gone，提示改为手动下载安装。
+
+  // 查询最新版本（只读，含 GitHub release 页面与 FPK 资产下载直链）
+  if (path === "/api/app/update/latest" && req.method === "GET") {
+    try {
+      const result = await checkLatestVersion();
+      return new Response(JSON.stringify(result), {
+        headers: { ...jsonHeaders(), "Cache-Control": "no-store" }
+      });
+    } catch (e) {
+      return new Response(JSON.stringify({ ok: false, error: e.message }), {
+        status: 500, headers: { ...jsonHeaders() }
+      });
+    }
+  }
+
+  // 自动升级已移除：提示用户手动下载 FPK 并在 fnOS 应用中心安装
+  if (path === "/api/app/update/auto" && req.method === "POST") {
+    return new Response(JSON.stringify({
+      ok: false,
+      error: "应用内自动升级已移除。请通过 /api/app/update/latest 获取下载链接，手动下载 FPK 后在 fnOS 应用中心安装。",
+      manual_download: true
+    }), {
+      status: 410, headers: { ...jsonHeaders() }
+    });
+  }
+
+  // 升级状态轮询已随自动升级一并移除
+  if (path === "/api/app/update/status" && req.method === "GET") {
+    return new Response(JSON.stringify({
+      status: "idle",
+      upgrading: false,
+      error: "自动升级已移除，无升级任务状态可查询",
+      manual_download: true
+    }), {
+      status: 410, headers: { ...jsonHeaders() }
+    });
+  }
+
+  // 手动上传安装占位接口一并停用（改为 fnOS 应用中心安装）
+  if (path === "/api/app/install/manual" && req.method === "POST") {
+    return new Response(JSON.stringify({
+      error: "应用内安装已停用。请手动下载 FPK 后在 fnOS 应用中心安装。",
+      manual_download: true
+    }), {
+      status: 410, headers: { ...jsonHeaders() }
+    });
+  }
+
 
   // ── Hermes 自更新（直接使用 uv，不依赖 dashboard）────────
   // GET  /api/hermes/update/check  → 从 PyPI 查询最新版本
@@ -2424,7 +2725,11 @@ async function handleFetch(req) {
       let latestDisplay = current; // 默认与当前版本相同
 
       try {
-        const res = await fetch('https://api.github.com/repos/NousResearch/hermes-agent/releases/latest', {
+        // hermes 引擎最新版本查上游官方仓库 NousResearch/hermes-agent
+        // （修复回归：此前误用应用打包仓库 iranee/fnos-hermes-agent）
+        const HERMES_GITHUB_REPO = process.env.HERMES_GITHUB_REPO || "NousResearch/hermes-agent";
+        const res = await fetch(`https://api.github.com/repos/${HERMES_GITHUB_REPO}/releases/latest`, {
+          signal: AbortSignal.timeout(15000),
           headers: {
             'User-Agent': 'fnos-hermes-agent/0.19.0',
           },
@@ -2546,7 +2851,10 @@ async function handleFetch(req) {
     // 获取最新 release 的 tag 名（比如 v2026.8.3）
     let targetTag = "main"; // 默认主分支
     try {
-      const res = await fetch('https://api.github.com/repos/NousResearch/hermes-agent/releases/latest', {
+      // 与 /api/hermes/update/check 一致：查上游官方仓库（修复误用打包仓库的回归）
+      const HERMES_GITHUB_REPO = process.env.HERMES_GITHUB_REPO || "NousResearch/hermes-agent";
+      const res = await fetch(`https://api.github.com/repos/${HERMES_GITHUB_REPO}/releases/latest`, {
+        signal: AbortSignal.timeout(15000),
         headers: { 'User-Agent': 'fnos-hermes-agent/0.19.0' },
       });
       if (res.ok) {
@@ -2628,7 +2936,7 @@ async function handleFetch(req) {
               log(`[更新] 克隆失败：exit ${code}`);
             }
             // 若失败则删除可能产生的空目录
-            try { require('fs').unlinkSync(HERMES_REPO_DIR); } catch {}
+            try { rmSync(HERMES_REPO_DIR, { recursive: true, force: true }); } catch {}
           }
           if (!existsSync(HERMES_REPO_DIR)) throw lastError;
         } else {
@@ -2837,18 +3145,15 @@ async function handleFetch(req) {
         log(`[更新] 等待 2 秒让新的 Hermes 二进制文件就绪...`);
         await new Promise(resolve => setTimeout(resolve, 2000));
         
-        const verResult = spawnSync("sh", ["-c", `${HERMES_BIN_PATH} --version`], {
-          timeout: 10000,
-          killSignal: "SIGKILL"
-        });
-        const verOut = (verResult.stdout || verResult.stderr || "").toString("utf8");
+        const verResult = await runCmdAsync("sh", ["-c", `${HERMES_BIN_PATH} --version`], 10000);
+        const verOut = verResult.stdout || verResult.stderr || "";
         if (verOut) {
           newVer = formatHermesVersion(verOut);
           HERMES_VERSION = newVer;
           try { writeFileSync(VERSION_FILE, newVer, { mode: 0o644 }); } catch {}
           log(`[更新] 新版本号：${newVer}`);
         } else {
-          throw new Error(`无法获取新版本号 (exit=${verResult.status})`);
+          throw new Error(`无法获取新版本号 (${verResult.error ? verResult.error.message : 'no output'})`);
         }
 
         updateExitCode = 0;
@@ -3679,8 +3984,14 @@ async function handleFetch(req) {
       return new Response(JSON.stringify({ error: "session_id and message required" }), { status: 400, headers: jsonHeaders() });
     }
     wsMessageQueue.set(session_id, message);
-    // 30秒后自动清除（防止 WS 连接未建立导致泄漏）
-    setTimeout(() => wsMessageQueue.delete(session_id), 30000);
+    // 30秒后自动清除（防止 WS 连接未建立导致泄漏）；
+    // 同 session 重复入队时先清掉旧定时器，避免旧定时器在新消息 30s 窗口内误删队列
+    const _prevTimer = wsQueueTimers.get(session_id);
+    if (_prevTimer) clearTimeout(_prevTimer);
+    wsQueueTimers.set(session_id, setTimeout(() => {
+      wsMessageQueue.delete(session_id);
+      wsQueueTimers.delete(session_id);
+    }, 30000));
     return new Response(JSON.stringify({ ok: true }), { headers: jsonHeaders() });
   }
 
@@ -3806,18 +4117,56 @@ async function handleFetch(req) {
     }
   }
 
+  // ─── 方案 B：/assets/* 兜底路由 ────────────────
+  // 前端构建产物用绝对路径 "/assets/xxx" 硬编码在 JS bundle 里（Vite/Rolldown modulepreload），
+  // 浏览器会直接请求根路径 /assets/xxx，而非经过 /proxy/dashboard/ 前缀。
+  // 此路由从 hermes-web-dist/assets/ 提供对应文件，兜底解决 404 问题。
+  // TODO: 一旦前端以 base:'./' 重新构建部署，此兜底可删除。
+  if (path.startsWith("/assets/")) {
+    const assetRel = path.slice("/assets/".length);
+    if (assetRel.includes("..") || !assetRel) return new Response("Forbidden", { status: 403 });
+    const assetFp = `${APP_DIR}/hermes-web-dist/assets/${assetRel}`;
+    if (!existsSync(assetFp)) return new Response("Not Found", { status: 404 });
+    const ext = assetFp.split(".").pop()?.toLowerCase();
+    const ct = ext === "js"   ? "application/javascript; charset=utf-8"
+             : ext === "css"  ? "text/css; charset=utf-8"
+             : ext === "map"  ? "application/json"
+             : ext === "woff2" ? "font/woff2"
+             : ext === "woff" ? "font/woff"
+             : "application/octet-stream";
+    return serveFile(assetFp, ct);
+  }
+
+  // /fonts/ 和 /fonts-terminal/ 兜底（index.html 中的字体引用）
+  if (path.startsWith("/fonts/") || path.startsWith("/fonts-terminal/")) {
+    const fontRel = path.slice(1); // 去掉前导 /
+    if (fontRel.includes("..")) return new Response("Forbidden", { status: 403 });
+    const fontFp = `${APP_DIR}/hermes-web-dist/${fontRel}`;
+    if (!existsSync(fontFp)) return new Response("Not Found", { status: 404 });
+    const ext = fontFp.split(".").pop()?.toLowerCase();
+    const ct = ext === "woff2" ? "font/woff2" : ext === "woff" ? "font/woff" : "application/octet-stream";
+    return serveFile(fontFp, ct);
+  }
+
+  // /favicon.ico 兜底
+  if (path === "/favicon.ico") {
+    const fp = `${APP_DIR}/hermes-web-dist/favicon.ico`;
+    if (existsSync(fp)) return serveFile(fp, "image/x-icon");
+  }
+
   // Dashboard 反代
   if (path.startsWith("/proxy/dashboard")) {
     return handleDashboardHttp(req, path);
   }
 
-  // 静态 UI — 根路径返回 index.html
+  // 静态 UI — 根路径返回 index.html（来自 ${APP_DIR}/ui）
   if (path === "/") {
     return serveFile(`${STATIC_DIR}/index.html`, "text/html; charset=utf-8");
   }
 
-  // /images/、/css/、/js/、/scripts/ 等路径下的静态资源
-  if (path.startsWith("/images/") || path.startsWith("/css/") || path.startsWith("/js/") || path.startsWith("/scripts/")) {
+  // /images/、/css/、/js/、/scripts/ 等简单静态资源（来自 ${APP_DIR}/ui）
+  if (path.startsWith("/images/") || path.startsWith("/css/") || 
+      path.startsWith("/js/") || path.startsWith("/scripts/")) {
     const relPath = path.slice(1);
     if (relPath.includes("..")) return new Response("Forbidden", { status: 403 });
     const fp  = `${STATIC_DIR}/${relPath}`;
@@ -3962,15 +4311,46 @@ export function handleServe(req, server) {
   if (wsPath === "/api/chat/ws") {
     const token = url.searchParams.get("token") || "";
     if (MONITOR_TOKEN && token !== MONITOR_TOKEN) {
+      // Better error handling - write directly to socket for Bun compatibility
+      // Note: This will be handled by node-adapter.js upgrade handler
       return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
     }
     const sessionId = url.searchParams.get("session_id") || "";
-    const message = wsMessageQueue.get(sessionId);
-    if (!sessionId || !message) {
-      return new Response(JSON.stringify({ error: "no pending message for session" }), { status: 400 });
+    const _q = wsMessageQueue.get(sessionId);
+    
+    // Allow empty queue connections (for reconnection scenarios)
+    if (!sessionId) {
+      return new Response(JSON.stringify({ error: "no session_id provided" }), { status: 400 });
     }
-    wsMessageQueue.delete(sessionId);
-    const upgraded = server.upgrade(req, { data: { sessionId, message, stopCtrl: null } });
+    
+    // Only delete queued message if it exists (preserve context for reconnects)
+    // ws-send 入队的是原始 message（string/array，前端契约），同时兼容
+    // {message, system, model, provider} 对象形式；无队列项 = 重连（message=null）
+    const message = _q
+      ? (typeof _q === "object" && !Array.isArray(_q) && _q !== null && "message" in _q ? _q.message : _q)
+      : null;
+    const _qObj = (_q && typeof _q === "object" && !Array.isArray(_q)) ? _q : {};
+    const system = _qObj.system || "";
+    const model = _qObj.model || "";
+    const provider = _qObj.provider || "";
+    if (_q) {
+      wsMessageQueue.delete(sessionId);
+      // 队列已被 WS 连接消费，取消待执行的清理定时器
+      const _t = wsQueueTimers.get(sessionId);
+      if (_t) { clearTimeout(_t); wsQueueTimers.delete(sessionId); }
+    }
+    
+    // Store enhanced data for reconnection support
+    const upgraded = server.upgrade(req, { 
+      data: { 
+        sessionId,
+        message,  // Can be null on reconnect
+        system,
+        model,
+        provider,  // Preserve context
+        stopCtrl: null
+      } 
+    });
     if (!upgraded) return new Response("WebSocket upgrade failed", { status: 500 });
     return; // 已升级
   }

@@ -1,13 +1,10 @@
-// Dashboard 集成模块 — 集中承载 monitor.js 中所有 Dashboard 专属逻辑：
-//   端口常量 / 进程启停(spawn 参数) / 健康探测 / HTTP 反代(前缀改写 + 注入脚本)
-//   / WS 反代(升级路由 + open/message/close 分支 + 反代加固：重连/心跳/缓冲)
+// Dashboard 集成模块
+
 //
-// 使用方式（monitor.js）：
-//   initDashboard({ port, gatewayPort, basePath, pidFile, log, readPid,
-//                   stopPid, spawnHermes, findGatewayPid, isPortListening, portAlive })
-// 共用基础设施（端口探测 / 进程管理 / 日志 / PID 读写）保留在 monitor.js，
-// 由上面的依赖注入传入，本模块不复制实现；Dashboard 相关问题只需修改本文件。
+// 使用方式（monitor.js）:
+
 import { spawn, WebSocketClient } from "./node-adapter.js";
+import { unlinkSync } from "node:fs";
 
 // ─── Dashboard 端口常量（monitor.js 的 gateway/dashboard 联合端口决策会引用） ───
 export const DEFAULT_DASHBOARD_PORT = 9119;
@@ -31,6 +28,10 @@ let D = {
 
 export function initDashboard(deps) {
   D = { ...D, ...deps };
+  // 补充传递 session token（由 monitor.js 注入）
+  if (deps.dashboardSessionToken) {
+    D.dashboardSessionToken = deps.dashboardSessionToken;
+  }
 }
 
 export function getDashboardPort() {
@@ -39,12 +40,23 @@ export function getDashboardPort() {
 
 // ─── 进程启停 ───────────────────────────────────────────────────────
 export function spawnDashboard() {
-  return D.spawnHermes("dashboard", D.pidFile, ["dashboard", "--host", DASHBOARD_BIND, "--port", String(D.port), "--no-open", "--insecure"]);
+  const result = D.spawnHermes("dashboard", D.pidFile, ["dashboard", "--host", DASHBOARD_BIND, "--port", String(D.port), "--no-open", "--insecure"]);
+  if (result.ok) {
+    D.log(`[Dashboard] 启动成功 pid=${result.pid}`);
+  } else {
+    D.log(`[Dashboard] ⚠️ 启动失败：${JSON.stringify(result)}`);
+  }
+  return result;
 }
 
 // POST /api/dashboard/start
 export function handleDashboardStart(jsonHeaders) {
   const r = spawnDashboard();
+  if (r.ok) {
+    D.log(`[Dashboard] 启动成功 pid=${r.pid}`);
+  } else {
+    D.log(`[Dashboard] ⚠️ 启动失败：${JSON.stringify(r)}`);
+  }
   return new Response(JSON.stringify({ dashboard: r }), { headers: jsonHeaders() });
 }
 
@@ -67,19 +79,41 @@ export async function checkDashboardHealth() {
     const r = await fetch(`http://${DASHBOARD_BIND}:${D.port}/`, {
       signal: AbortSignal.timeout(300),
     });
-    return r.ok;
-  } catch { return false; }
+    const healthy = r.ok;
+    
+    // 只在状态变化时记录日志
+    if (healthy && lastDashboardHealthStatus !== true) {
+      D.log(`[Dashboard Health] ✓ 健康检查通过 (端口 ${D.port})`);
+      lastDashboardHealthStatus = true;
+    } else if (!healthy && lastDashboardHealthStatus !== false) {
+      D.log(`[Dashboard Health] ✗ 健康检查失败：${r.status || 'fetch failed'}`);
+      lastDashboardHealthStatus = false;
+    }
+    
+    return healthy;
+  } catch (e) { 
+    // 只在首次失败时记录详细错误
+    if (lastDashboardHealthStatus !== false) {
+      D.log(`[Dashboard Health] ✗ 健康检查失败：${e?.message || e}`);
+      lastDashboardHealthStatus = false;
+    }
+    return false; 
+  }
 }
 
 // ─── HTTP 反代 ──────────────────────────────────────────────────────
-// 网关重启完成判定：无 systemd 环境下 `hermes gateway restart` 进程会转为常驻网关永不退出，
-// 官方 get_action_status 仅凭该进程是否退出判定完成，导致前端「重启中」永不结束。
-// 记录最近一次重启请求时刻，配合端口健康检查在代理层收尾该状态。
 const RESTART_SETTLE_MS = 6000;
 let lastGatewayRestartTs = 0;
-// 按 pid 记录首次观测到 gateway-restart 进程处于 running 的时刻。
-// 不依赖重启请求是否经代理、也不依赖日志时间戳解析，避免 monitor 重启、
-// 或日志被常驻网关写满截断时 settle 永不触发导致「重启中」卡死。
+
+// Dashboard 健康检查状态跟踪（避免每秒重复日志）
+let lastDashboardHealthStatus = null;
+
+// 本地进程存活检查（避免依赖 monitor.js 私有函数）
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch { return false; }
+}
+
 let restartFirstSeen = { pid: 0, ts: 0 };
 
 // /proxy/dashboard 路由入口：前缀剥离守卫 + 未运行 503 + 反代
@@ -88,27 +122,48 @@ export function handleDashboardHttp(req, path) {
   if (subPath.includes("..")) return new Response("Forbidden", { status: 403 });
 
   // Dashboard 未运行时直接返回 503，不进入 proxy 避免打错误日志
-  if (!D.readPid(D.pidFile)) {
+  const dbPid = D.readPid(D.pidFile);
+  if (!dbPid) {
+    D.log(`[Dashboard Proxy] Dashboard 未运行 (PID 文件缺失)`);
     return new Response(JSON.stringify({ error: "Dashboard is not running" }), {
       status: 503,
       headers: { "Content-Type": "application/json" },
     });
   }
+  
+  // 额外检查：进程是否真正存活
+  if (!pidAlive(dbPid)) {
+    D.log(`[Dashboard Proxy] Dashboard 进程已死亡 (pid=${dbPid})`);
+    try { unlinkSync(D.pidFile); } catch {}
+    return new Response(JSON.stringify({ error: "Dashboard process died" }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  
   return proxyDashboard(req);
 }
 
 async function proxyDashboard(req) {
   const url     = new URL(req.url);
+  // 自动探测 Portal 前缀：从路径中提取 /proxy/dashboard 之前的部分
+  const _dashPrefixBase = (url.pathname.split("/proxy/dashboard")[0] || "").replace(/\/+$/, "");
+  const basePathClean = (D.basePath || "").replace(/\/+$/, "");
+  const prefix = (_dashPrefixBase || basePathClean || "/") + "/proxy/dashboard";
+
+  // [LOG] 记录请求入口信息
+  D.log(`[Dashboard Proxy] REQUEST: prefix=${prefix}, request.url=${req.url}, url.pathname=${url.pathname}`);
+
   // req.url 仍含 BASE_PATH 前缀（handleFetch 只剥了 path 变量），需先去掉
   const subPath = url.pathname
-    .replace(new RegExp(`^${D.basePath.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}`), "")
+    .replace(new RegExp(`^${prefix.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}`), "")
     .replace(/^\/proxy\/dashboard/, "") || "/";
   const target  = `http://${DASHBOARD_BIND}:${D.port}${subPath}${url.search}`;
 
-  const prefix = `${D.basePath || ""}/proxy/dashboard`;
+  // [LOG] 记录解析后的子路径和目标 URL
+  D.log(`[Dashboard Proxy] PARSED: subPath="${subPath}", targetUrl="${target}"`);
 
-  // 记录网关重启请求时刻 + 重启前的网关 pid：既用于后续判定重启是否已实际完成，
-  // 也用于检测官方复用守卫是否发生「未真正重启」的空操作（返回 pid == 重启前 pid）。
+// 记录网关重启请求时刻
   let restartPreGwPid = 0;
   if (req.method === "POST" && subPath === "/api/gateway/restart") {
     lastGatewayRestartTs = Date.now();
@@ -136,6 +191,7 @@ async function proxyDashboard(req) {
         try {
           const abs = new URL(loc, target);
           respHeaders.set("location", prefix + abs.pathname + abs.search);
+          D.log(`[Dashboard Proxy] REDIRECT: Location 改为 ${prefix + abs.pathname + abs.search}`);
         } catch {}
       }
       return new Response(upstream.body, { status: upstream.status, headers: respHeaders });
@@ -143,13 +199,10 @@ async function proxyDashboard(req) {
 
     const contentType = respHeaders.get("content-type") || "";
 
-    // ── 网关重启 POST：修复官方复用守卫导致的「连续第二次重启空操作」 ──
-    // 无 systemd 下 `hermes gateway restart` 进程(P1)杀旧网关后自身转为常驻网关不退出，
-    // 官方 _spawn_gateway_restart 的复用守卫见 P1 仍存活便直接 return existing(空操作)，
-    // 返回的 pid 即当前在跑的网关本体 → 第二次重启根本没重启、动作日志无新输出，
-    // 前端永久卡在「重启中/等待输出…」。检测到返回 pid == 重启前网关 pid（即未真正重启）时，
-    // 杀掉旧网关并重发一次，迫使官方 spawn 出真正的新 restart 进程。monitor 无自动重生
-    // 循环（网关仅由 /api/start、/api/restart 显式启动），故此处杀进程不会与 monitor 抢占冲突。
+    // [LOG] 记录上游返回的 Content-Type（用于后续 HTML/CSS 识别）
+    D.log(`[Dashboard Proxy] UPSTREAM RESPONSE: status=${upstream.status}, content-type="${contentType}"`);
+
+    // ── 网关重启 POST：强制重发 ──
     if (req.method === "POST" && subPath === "/api/gateway/restart") {
       let bodyText = await upstream.text();
       try {
@@ -192,8 +245,6 @@ async function proxyDashboard(req) {
     }
 
     // ── 网关重启 action 状态改写 ──
-    // `hermes gateway restart` 进程转为常驻网关不退出 → 官方永远回报 running:true。
-    // 重启实际已完成（距请求已过 settle 且网关端口健康）时改写为 running:false 收尾「重启中」。
     if (req.method === "GET" && subPath === "/api/actions/gateway-restart/status") {
       let bodyText = await upstream.text();
       try {
@@ -201,14 +252,14 @@ async function proxyDashboard(req) {
         if (j && j.running === true) {
           const now = Date.now();
           const pid = Number(j.pid) || 0;
-          // pid 变化视为新的重启进程，重新计时；常驻进程复用时沿用首次观测时刻
+// pid 变化视为新的重启进程
           if (restartFirstSeen.pid !== pid) {
             restartFirstSeen = { pid, ts: now };
           }
           // 以「用户最近一次点击重启」或「首次观测到 running」中较晚者为起点计 settle
           const startedMs = Math.max(restartFirstSeen.ts, lastGatewayRestartTs || 0);
           const settled = (now - startedMs) > RESTART_SETTLE_MS;
-          // 8642 为非 HTTP 内部端口，优先用 /proc 的 LISTEN 判据，HTTP 探活作兜底
+// 优先用 /proc 的 LISTEN 判据
           const listening = D.isPortListening(D.gatewayPort);
           const alive = settled && (listening || await D.portAlive(D.gatewayPort));
           if (settled && alive) {
@@ -228,62 +279,160 @@ async function proxyDashboard(req) {
       return new Response(bodyText, { status: upstream.status, headers: respHeaders });
     }
 
-    // ── CSS 响应：改写 url(/...) 加前缀，让字体等 url() 引用能正确路由 ──
-    if (contentType.includes("text/css") || subPath.endsWith(".css")) {
+// ── CSS 响应：改写 url(/...) ──
+    // [METHOD 1] 通过 contentType 判断
+    // [METHOD 2] 兜底：检查 subPath 是否指向 .css 文件
+    const isCssByType = contentType.toLowerCase().includes("text/css");
+    const isCssByPath = subPath.endsWith(".css");
+    
+    if (isCssByType || isCssByPath) {
+      D.log(`[Dashboard Proxy] CSS DETECTED: isCssByType=${isCssByType}, isCssByPath=${isCssByPath}, subPath="${subPath}"`);
+      
       let css = await upstream.text();
-      css = css.replace(/url\((\/[^)'"]+)\)/g, `url(${prefix}$1)`);
+      
+      // [MODIFY] 路径重写
+      const originalCss = css.substring(0, 200).replace(/[\r\n]/g, '\\n');
+      D.log(`[Dashboard Proxy] CSS CONTENT STARTS WITH: ${originalCss}`);
+      
+      css = css.replace(/url\((\/[^)'"\+])\)/g, `url(${prefix}$1)`);
+      
       respHeaders.delete("content-length");
       return new Response(css, { status: upstream.status, headers: respHeaders });
     }
 
-    // ── HTML 响应：注入 <base> + 路径改写脚本 ──
-    if (contentType.includes("text/html")) {
+// ── HTML 响应：注入 <base> + 路径改写脚本 ──
+    // [STRATEGY 1] 通过 contentType 判断（原方法，兼容各种变体）
+    const isHtmlByContentType = contentType.toLowerCase().includes("text/html") 
+        || contentType.startsWith("application/xhtml")
+        || (upstream.headers.get("content-type") && upstream.headers.get("content-type").match(/html|xml/i));
+    
+    // [STRATEGY 2] 通过 subPath 后缀判断（更可靠，不依赖上游返回的 header）
+    const isHtmlByPath = subPath === "/" || subPath.endsWith(".html");
+    
+    // [STRATEGY 3] Trim CLI 模式：已知 SPA 路由强制 HTML 处理（即使 content-type 错误）
+    const isKnownSpaRoute = /^(\/chat|\/models|\/profiles|\/files|\/mcp|\/webhooks|\/rules|\/sessions|\/skills|\/analytics|\/cron|\/env|\/system|\/docs|\/log|\/pairing|\/console)$/i.test(subPath);
+    
+    // [DIAGNOSTIC] 当是已知的 SPA 路由但返回非 HTML 类型时输出警告
+    if (isKnownSpaRoute && !contentType.includes("text/html")) {
+      D.log(`[Dashboard Proxy] WARNING: SPA route '${subPath}' returned non-HTML content-type (${contentType}), forcing HTML processing`);
+    }
+    
+    // 组合判断：优先使用 STRATEGY 3（强制），然后其他策略任意一个匹配即可
+    const isHtmlResponse = isKnownSpaRoute || isHtmlByContentType || isHtmlByPath;
+    
+    if (isHtmlResponse) {
+      // [LOG] HTML 检测结果详情
+      D.log(`[Dashboard Proxy] HTML DETECTION:`);
+      D.log(`  - isHtmlByContentType: ${isHtmlByContentType} (contentType="${contentType}")`);
+      D.log(`  - isHtmlByPath: ${isHtmlByPath} (subPath="${subPath}")`);
+      D.log(`  - isKnownSpaRoute: ${isKnownSpaRoute}`);
+      D.log(`  - FINAL DECISION: HTML response will be processed`);
+          
       let html = await upstream.text();
+          
+      // [LOG] 原始 HTML 片段（前 500 字符）
+      const htmlPreview = html.substring(0, 500).replace(/\r\n/g, '\\n');
+      D.log(`[Dashboard Proxy] HTML PREVIEW (${html.length} bytes): ${htmlPreview}`);
+      
+      // [CHECK] 检查原始 HTML 是否已有 base 标签
+      const hasOriginalBaseTag = /<base\s[^>]*>/gi.test(html);
+      D.log(`[Dashboard Proxy] HAS ORIGINAL BASE TAG: ${hasOriginalBaseTag}`);
+      
+      // <base> 处理相对路径（多模式兼容）—— 根治静态脚本 404
+      html = html.replace(/<base\s[^>]*>/gi, ""); // 先删除原有 base（如果有）
+      
+      if (hasOriginalBaseTag) {
+        D.log(`[Dashboard Proxy] INFO: Removed existing <base> tag`);
+      }
 
-      // <base> 处理相对路径（CSS url()、相对 src 等）—— 多模式兼容
-      if (!/<base\s[^>]*>/i.test(html)) {
-        // 尝试：<head attr="value"> / <head/> / <head \n...>
-        const headMatch = html.match(/<head(?:\s[^>]*)?>/i);
-        if (headMatch) {
-          const endIdx = headMatch.index + headMatch[0].length;
-          html = html.slice(0, endIdx) + `<base href="${prefix}/">` + html.slice(endIdx);
+      // 尝试：<head attr="value"> / <head/> / <head \n...>
+      const headMatch = html.match(/<head(?:\s[^>]*)?>/i);
+      if (headMatch) {
+        const endIdx = headMatch.index + headMatch[0].length;
+        const newBaseTag = `<base href="${prefix}/">`;
+        html = html.slice(0, endIdx) + newBaseTag + html.slice(endIdx);
+        D.log(`[Dashboard Proxy] INJECTED <base> tag into <head>: ${newBaseTag}`);
+      } else {
+        // 兜底：有 <html> 标签时插入其后；既无 <head> 也无 <html> 时直接置于文档开头
+        const baseTag = `<base href="${prefix}/">`;
+        const htmlIdx = html.indexOf('<html');
+        if (htmlIdx !== -1) {
+          html = html.slice(0, htmlIdx) + baseTag + html.slice(htmlIdx);
+          D.log(`[Dashboard Proxy] INSERTED <base> after <html> tag`);
         } else {
-          // 兜底：在最接近开头的位置插入
-          const htmlIdx = html.indexOf('<html');
-          const idx = htmlIdx !== -1 ? htmlIdx : 0;
-          const baseTag = `<base href="${prefix}/">`;
-          if (idx === -1) {
-            html = baseTag + html;
-          } else {
-            html = html.slice(0, idx) + `<div>${baseTag}</div>` + html.slice(idx);
-          }
+          html = baseTag + html;
+          D.log(`[Dashboard Proxy] APPENDED <base> at document start (fallback)`);
         }
       }
 
-      // 静态重写 src 属性中的绝对路径（脚本、图片等）
-      html = html.replace(/\bsrc="\/(?!\/)/g, `src="${prefix}/`);
-      // 静态重写 <link href>（CSS 样式表），不改写 <a href>（SPA 路由需要原始路径）
-      html = html.replace(/<link(\s[^>]*)href="\/(?!\/)/g, (m, a) => `<link${a}href="${prefix}/`);
-      
-      // 额外补漏：把模块 preload links 也加前缀（上游很多 modulepreload）
-      // ⚠️ 只改写 /assets/开头的，避免重复加前缀（<base>已生效时会自动解析相对路径）
-      html = html.replace(/<link(\s[^>]*)rel="modulepreload"(\s[^>]*)href="\/assets\//g,
-        (match, before, after) => `<link${before}rel="modulepreload"${after}href="${prefix}/assets/`);
+      // [LOG] Injected base tag verification
+      const verifiedBaseTag = /<base\shref="([^"]+)"/i.exec(html);
+      if (verifiedBaseTag) {
+        D.log(`[Dashboard Proxy] VERIFIED BASE TAG: href="${verifiedBaseTag[1]}"`);
+      } else {
+        D.log(`[Dashboard Proxy] WARNING: Base tag not found in final HTML!`);
+      }
 
-      // 注入 CSS：小屏 UI 修正（只在代理层注入覆盖，不改上游 Dashboard 本体）
-      //   1. 侧边栏浮层背景：<1024px(lg) 时 #app-sidebar 是 fixed 浮层，上游内联 style 的
-      //      --component-sidebar-background 是半透明玻璃色，会透出后面正文。这里用主题背景色
-      //      --background-base（ThemeProvider 换主题时重写，深浅色自适应）打底 80% 不透明
-      //      + 毛玻璃模糊；须 !important 才能压过内联 style；桌面态(≥lg)不受影响。
-      //   2. 小屏字号基准：--theme-base-size 是全局 rem/字号基准（html{font-size:var(...)}），
-      //      上游默认 18px 在手机上偏大。≤768px（与上游 index.css 自身的移动态断点一致）
-      //      统一降为 15px（上游 :root 默认值，设计体系内现成的可读档位）；
-      //      ThemeProvider 会把该变量写成内联 style，须 !important 才能压过；
-      //      再对 html 直接补一道 font-size 兜底，防上游内联写死 font-size 的情况。
-      //   3. 语言切换按钮：其文字 label 带 Tailwind hidden sm:inline，<640px(sm) 时按钮内
-      //      只剩被隐藏的文字、无任何图标 → 整个按钮不可见。恢复文字显示即可（点击行为不变）。
-      //      用 :not(:has(svg)) 精确区分它与旁边带调色板图标的主题切换按钮；
-      //      不支持 :has 的浏览器走 @supports 兜底，放宽到两个按钮的文字都恢复显示。
+      // 静态重写 src 属性中的绝对路径
+      const scriptCountBefore = (html.match(/src="\//g) || []).length;
+      html = html.replace(/\bsrc="\/(?!\/)/g, `src="${prefix}/`);
+      const prefixRegexForMatch = 'src="' + prefix + '/';
+      const scriptCountAfter = (html.split(prefixRegexForMatch).length - 1);
+      if (scriptCountBefore !== scriptCountAfter) {
+        D.log('[Dashboard Proxy] SRC REWRITE: ' + scriptCountBefore + ' -> ' + scriptCountAfter);
+      }
+            
+      // 也处理单引号的情况
+      const singleQuoteSrcBefore = (html.match(/src='\//g) || []).length;
+      html = html.replace(/\bsrc='\/(?!\/)/g, `src='${prefix}/`);
+      const singleQuoteMatchPattern = "src='" + prefix + "/";
+      const singleQuoteSrcAfter = (html.split(singleQuoteMatchPattern).length - 1);
+      if (singleQuoteSrcBefore !== singleQuoteSrcAfter) {
+        D.log('[Dashboard Proxy] SINGLE-QUOTE SRC REWRITE: ' + singleQuoteSrcBefore + ' -> ' + singleQuoteSrcAfter);
+      }
+      
+      // 静态重写 <link href>（CSS 样式表），不改写 <a href>（SPA 路由需要原始路径）
+      const linkHrefBefore = (html.match(/href="\//g) || []).length;
+      html = html.replace(/<link(\s[^>]*)href="\/(?!\/)/g, function(m, a) { return '<link' + a + 'href="' + prefix + '/'; });
+      html = html.replace(/<link(\s[^>]*)href='\/(?!\/)/g, function(m, a) { return "<link" + a + "href='" + prefix + "'/"; });
+      const doubleQuoteMatchPattern = 'href="' + prefix + '/';
+      const singleQuoteMatchPattern2 = "href='" + prefix + "'/";
+      const linkHrefAfter = (html.split(doubleQuoteMatchPattern).length - 1) + (html.split(singleQuoteMatchPattern2).length - 1);
+      if (linkHrefBefore !== linkHrefAfter) {
+        D.log('[Dashboard Proxy] LINK HREF REWRITE: ' + linkHrefBefore + ' -> ' + linkHrefAfter);
+      }
+      
+      // 额外补漏：把模块 preload links 也加前缀
+      html = html.replace(/<link(\s[^>]*)rel="modulepreload"(\s[^>]*)href="\/assets\//g,
+        function(match, before, after) { return '<link' + before + 'rel="modulepreload"' + after + 'href="' + prefix + '/assets/'; });
+      html = html.replace(/<link(\s[^>]*)rel='modulepreload'(\s[^>]*)href='\/assets\//g,
+        function(match, before, after) { return "<link" + before + "rel='modulepreload'" + after + "href='" + prefix + "/assets/"; });
+
+// ── inject window.__HERMES_BASE_PATH__（Chat WS 根因修复）──────────────
+      const originalBasePath = html.match(/window\.__HERMES_BASE_PATH__="([^"]*)"/);
+      html = html.replace(/window\.__HERMES_BASE_PATH__="[^"]*"/g, `window.__HERMES_BASE_PATH__="${prefix}"`);
+      
+      if (originalBasePath) {
+        D.log(`[Dashboard Proxy] HERMES_BASE_PATH: changed from "${originalBasePath[1]}" to "${prefix}"`);
+      } else {
+        // 补充：若上游未注入（旧版 Dashboard），兜底添加 ──
+        if (!/<script>window\.__HERMES_BASE_PATH__=/.test(html)) {
+          html = html.replace("</head>", `<script>window.__HERMES_BASE_PATH__="${prefix}";</script></head>`);
+          D.log(`[Dashboard Proxy] HERMES_BASE_PATH: injected new <script> tag`);
+        } else {
+          D.log(`[Dashboard Proxy] HERMES_BASE_PATH: already exists in another format`);
+        }
+      }
+      
+      // [DIAGNOSTIC] Verify base path was set
+      const verifiedBasePath = html.match(/window\.__HERMES_BASE_PATH__="([^"]*)"/);
+      if (verifiedBasePath) {
+        D.log(`[Dashboard Proxy] BASE PATH INJECTION VERIFIED: ${verifiedBasePath[1]}`);
+      } else {
+        D.log(`[Dashboard Proxy] WARNING: Base path variable not found in final HTML!`);
+      }
+
+// 注入 CSS：小屏 UI 修正
       const styleInject = `<style>
 @media (max-width: 1023.98px) {
   #app-sidebar {
@@ -325,14 +474,15 @@ async function proxyDashboard(req) {
 }
 </style>`;
 
-      // 注入 JS：智能前缀管理（pushState剥离+导航感知恢复+popstate拦截）
+// 注入 JS：智能前缀管理 - 已移除 conflict 的 history 劫持逻辑（避免与 React Router basename 冲突）
       const inject = `<script>
 (function(){
   var P="${prefix}";
+  console.log('[Dashboard Proxy] Base path:', P);
   function rw(u){
     if(typeof u!=="string")return u;
     if(u.indexOf("//")===0||/^[a-z]+:/i.test(u))return u;
-    if(u.charAt(0)==="/"){if(u.indexOf(P)===0)return u;return P+u;}
+    if(u.charAt(0)==="/" ){if(u.indexOf(P)===0)return u;return P+u;}
     return u;
   }
   function strip(u){
@@ -340,54 +490,6 @@ async function proxyDashboard(req) {
     if(u.indexOf(P)===0)return u.substring(P.length)||"/";
     return u;
   }
-  var _ps=history.pushState,_rs=history.replaceState;
-  var _pn=location.pathname;
-  /* ── 安全恢复前缀（微任务，比 rAF 更快恢复前缀） ── */
-  function sched(){
-    Promise.resolve().then(function(){
-      if(location.pathname===_pn){
-        var s=location.search||"",h=location.hash||"";
-        _rs.call(history,history.state,"",rw(_pn)+s+h);
-      }
-    });
-  }
-  /* ── 初始加载：清理 URL 让 SPA 路由启动 ── */
-  if(_pn.indexOf(P)===0){
-    var cl=_pn.substring(P.length)||"/";
-    _rs.call(history,history.state,"",cl+location.search+location.hash);
-    _pn=cl;
-    sched();
-  }
-  /* ── pushState：剥离前缀给路由，微任务恢复前缀给地址栏 ── */
-  history.pushState=function(s,t,u){
-    _pn=u?(u.split("?")[0].split("#")[0]):location.pathname;
-    var c=u?strip(u):u;
-    _ps.call(this,s,t,c);
-    if(u)sched();
-  };
-  history.replaceState=function(s,t,u){
-    _pn=u?(u.split("?")[0].split("#")[0]):location.pathname;
-    var c=u?strip(u):u;
-    _rs.call(this,s,t,c);
-    if(u)sched();
-  };
-  /* ── popstate：后退/前进时临时清理 URL ── */
-  var _ae=EventTarget.prototype.addEventListener;
-  EventTarget.prototype.addEventListener=function(type,fn,opt){
-    if(type==="popstate"&&fn){
-      var w=function(ev){
-        var cp=location.pathname;
-        var cl=cp.indexOf(P)===0?(cp.substring(P.length)||"/"):cp;
-        _rs.call(history,history.state,"",cl+location.search+location.hash);
-        _pn=cl;
-        fn.call(this,ev);
-        _rs.call(history,history.state,"",cp+location.search+location.hash);
-        _pn=cp;
-      };
-      return _ae.call(this,type,w,opt);
-    }
-    return _ae.call(this,type,fn,opt);
-  };
   /* ── fetch / XHR：添加前缀 ── */
   var _f=window.fetch;
   window.fetch=function(i,o){
@@ -400,12 +502,17 @@ async function proxyDashboard(req) {
     if(arguments.length>1)arguments[1]=rw(arguments[1]);
     return _xo.apply(this,arguments);
   };
-  /* ── MutationObserver：只改写 src ── */
-  function rwEl(el){
-    if(el.hasAttribute("src")){var s=el.getAttribute("src");if(s&&s.charAt(0)==="/"&&s.indexOf(P)!==0)el.setAttribute("src",P+s);}
+  /* ── MutationObserver：改写 src 和 href ── */
+  function rwAttr(el,attr){
+    var v=el.getAttribute(attr);
+    if(v&&v.charAt(0)==="/"&&v.indexOf(P)!==0){el.setAttribute(attr,P+v);}
   }
-  new MutationObserver(function(ms){ms.forEach(function(m){if(m.type==="childList")m.addedNodes.forEach(function(n){if(n.nodeType===1){rwEl(n);n.querySelectorAll&&n.querySelectorAll("[src]").forEach(rwEl);}});});}).observe(document.documentElement,{childList:true,subtree:true});
-  document.querySelectorAll("[src]").forEach(rwEl);
+  function rwEl(el){
+    if(el.hasAttribute("src"))rwAttr(el,"src");
+    if(el.tagName==="LINK"&&el.hasAttribute("href"))rwAttr(el,"href");
+  }
+  new MutationObserver(function(ms){ms.forEach(function(m){if(m.type==="childList")m.addedNodes.forEach(function(n){if(n.nodeType===1){rwEl(n);n.querySelectorAll&&n.querySelectorAll("[src],link[href]").forEach(rwEl);}});if(m.type==="attributes"&&m.target.nodeType===1)rwEl(m.target);});}).observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["src","href"]});
+  document.querySelectorAll("[src],link[href]").forEach(rwEl);
   /* ── hook HTMLScriptElement.src setter：createElement("script") 后 v.src=...
      走的不是 fetch/XHR，需要在这里加前缀 ── */
   var _sp=HTMLScriptElement.prototype,_sd=Object.getOwnPropertyDescriptor(_sp,"src");
@@ -414,6 +521,14 @@ async function proxyDashboard(req) {
      走的不是 fetch/XHR，需要在这里加前缀 ── */
   var _lp=HTMLLinkElement.prototype,_ld=Object.getOwnPropertyDescriptor(_lp,"href");
   if(_ld&&_ld.set){var _ls=_ld.set,_lg=_ld.get;Object.defineProperty(_lp,"href",{get:function(){return _lg?_lg.call(this):undefined;},set:function(v){if(typeof v==="string"&&v.charAt(0)==="/"&&v.indexOf(P)!==0)v=P+v;_ls.call(this,v);},configurable:true,enumerable:_ld.enumerable});}
+  /* ── hook setAttribute：拦截所有通过 setAttribute 设置的 src/href ── */
+  var _origSetAttr=Element.prototype.setAttribute;
+  Element.prototype.setAttribute=function(name,value){
+    if((name==="src"||name==="href")&&typeof value==="string"&&value.charAt(0)==="/"&&value.indexOf(P)!==0&&value.indexOf("//")!==0){
+      value=P+value;
+    }
+    return _origSetAttr.call(this,name,value);
+  };
   /* ── hook WebSocket：给 dashboard WS URL 加前缀，路由到 monitor 反代 ── */
   var _WS=window.WebSocket;
   /* iOS 第三方输入法(如百度)在 xterm 终端无法输入的补偿所需：
@@ -449,10 +564,7 @@ async function proxyDashboard(req) {
     return new _WS(url,protocols);
   };
   window.WebSocket.prototype=_WS.prototype;
-  /* 关键：保留构造器静态常量（CONNECTING/OPEN/CLOSING/CLOSED）。
-     dashboard 前端发送输入前常用 ws.readyState===WebSocket.OPEN 做门禁；
-     覆盖构造器若丢掉这些常量，OPEN 变 undefined → 门禁永不成立 → 输入帧发不出去
-     （服务端推来的输出仍走 onmessage，故表现为“画面能显示、但无法输入/发送”）。 */
+
   window.WebSocket.CONNECTING=_WS.CONNECTING;
   window.WebSocket.OPEN=_WS.OPEN;
   window.WebSocket.CLOSING=_WS.CLOSING;
@@ -462,7 +574,7 @@ async function proxyDashboard(req) {
      根因：部分第三方 IME 的组合提交未触发 xterm 期望的事件序列，组合文字从不经
      /api/pty 发出。这里在组合结束/插入后核对：若该文字未被 xterm 经 pty socket 发出，
      则由我们补发到 /api/pty（服务端 pty_ws 同时接受 text/bytes 帧，text 按 UTF-8 编码）。
-     去重：仅当“事件发生之后”pty 未发出该文字才补发；xterm 正常处理会在事件后立即发出，
+     去重：仅当"事件发生之后"pty 未发出该文字才补发；xterm 正常处理会在事件后立即发出，
      且我们自己的补发也会被记录，天然避免重复；不同次提交按时间戳区分，允许连续重复字。 */
   function _isTermTarget(t){
     try{return !!(t&&((t.classList&&t.classList.contains("xterm-helper-textarea"))||(t.closest&&t.closest(".xterm"))));}
@@ -497,6 +609,10 @@ async function proxyDashboard(req) {
 
       respHeaders.delete("content-length");
       respHeaders.delete("content-encoding");
+      // 强制禁用缓存，确保每次都能获取最新的 HTML
+      respHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate");
+      respHeaders.set("Pragma", "no-cache");
+      respHeaders.set("Expires", "0");
       return new Response(html, { status: upstream.status, headers: respHeaders });
     }
 
@@ -517,14 +633,13 @@ async function proxyDashboard(req) {
 }
 
 // ─── WS 反代 ────────────────────────────────────────────────────────
-// Dashboard WebSocket 反代路径：/proxy/dashboard/api/(ws|events|pty)
 export function matchDashboardWsPath(wsPath) {
   return wsPath.startsWith("/proxy/dashboard/api/ws") ||
          wsPath.startsWith("/proxy/dashboard/api/events") ||
          wsPath.startsWith("/proxy/dashboard/api/pty");
 }
 
-// WS 升级路由：未运行 503 / 升级失败 500 / 升级成功返回 undefined
+
 export function upgradeDashboardWs(req, server, wsPath, url) {
   if (!D.readPid(D.pidFile)) {
     return new Response(JSON.stringify({ error: "Dashboard is not running" }), {
@@ -532,8 +647,14 @@ export function upgradeDashboardWs(req, server, wsPath, url) {
       headers: { "Content-Type": "application/json" },
     });
   }
-  const subPath = wsPath.replace(/^\/proxy\/dashboard/, "");
-  const targetUrl = `ws://${DASHBOARD_BIND}:${D.port}${subPath}${url.search}`;
+  // 自动探测 Portal 前缀并从子路径中剥离
+  const _dashPrefixBase = (wsPath.split("/proxy/dashboard")[0] || "").replace(/\/+$/, "");
+  const subPath = wsPath.replace(new RegExp(`^${(_dashPrefixBase || D.basePath).replace(/\/+$/, "")}/proxy/dashboard`), "") || "/";
+  
+  // WebSocket 连接需要附加 session token（避免 401 鉴权失败）
+  const _sep = url.search ? "&" : "?";
+  const targetUrl = `ws://${DASHBOARD_BIND}:${D.port}${subPath}${url.search}${_sep}token=${D.dashboardSessionToken}`;
+  
   const upgraded = server.upgrade(req, { data: { type: "dashboard-proxy", targetUrl } });
   if (!upgraded) return new Response("WebSocket upgrade failed", { status: 500 });
   return;
@@ -543,20 +664,13 @@ export function upgradeDashboardWs(req, server, wsPath, url) {
 export function handleDashboardWsOpen(ws) {
   const { targetUrl } = ws.data;
   if (!targetUrl) {
-    // 防御性兜底：正常情况下 node-adapter.js 已经不会再产出没有
-    // targetUrl 的连接了，这里只是避免万一出现该情况时直接把 null
-    // 传给 WebSocketClient 构造函数，导致 ws 库内部访问
-    // options.autoPong 时抛出 TypeError。
     D.log(`[WS-PROXY] open with empty targetUrl, closing`);
     try { ws.close(1011, "no target url"); } catch {}
     return;
   }
-  D.log(`[WS-PROXY] open → ${targetUrl}`);
-  // 加固接入：上游断线重连（4409 静默重挂 / 异常码指数退避）、
-  // 双向 30s 心跳、重连窗口内浏览器消息缓冲；message()/close()
-  // 分支照旧读 ws.data.upstream，无需感知重连过程
+D.log(`[WS-PROXY] open → ${maskUrlToken(targetUrl)}`);
+  // 加固接入：上游断线重连、双向心跳、消息缓冲
   wrapDashboardProxy(ws, () => new WebSocketClient(targetUrl, {
-    // 显式传 Host header 匹配上游 loopback 校验（_is_accepted_host）
     headers: { "Host": `${DASHBOARD_BIND}:${D.port}` },
   }), { log: D.log });
 }
@@ -576,50 +690,37 @@ export function handleDashboardWsClose(ws) {
   D.log(`[WS-PROXY] client closed`);
 }
 
-// ─── WS 反代加固 — 上游重连 / 关闭码分类 / 双向心跳 / 断线消息缓冲 ───────
-//
-// 由上方 handleDashboardWsOpen 在 open() 一处接入：
-//   wrapDashboardProxy(ws, upstreamFactory, { log })
-//
-// 依赖约定（与 node-adapter.js 的 ws 抽象一致，不引第三方库）：
-//   - ws        浏览器侧连接：send / close / ping / on("pong") / on("close")
-//   - upstream  由 upstreamFactory() 每次新建（相同 URL 与鉴权头重新拨号）：
-//               addEventListener(open/message/close/error)、send / close，
-//               可选 ping / on("pong") / terminate
-//
-// 与 message()/close() 分支的配合方式：分支保持原样——转发分支只认
-// ws.data.upstream.readyState === 1 后调用 send()，因此重连窗口内本模块把
-// ws.data.upstream 换成一个 readyState=1 的缓冲桩，消息自然落入 sendQueue，
-// 重连成功后按原顺序 flush，转发分支无需感知重连过程。
+// ─── WS 反代加固 ──────────────────────────────────────────────────────
+// 由上方 handleDashboardWsOpen 在 open() 一处接入
 
 // 指数退避延迟：baseMs 起步，每次 ×2，封顶 maxMs
 function backoffDelay(attempt, baseMs = 500, maxMs = 8000) {
   return Math.min(baseMs * Math.pow(2, Math.max(0, attempt)), maxMs);
 }
 
-// 上游关闭码分类：
-//   1000/1001       正常关闭（用户主动离开）→ 原样透传给浏览器，不重连
-//   4409            会话被新连接顶替 → 静默快速重连，不通知浏览器
-//   其余（含 1006） 异常断开 → 指数退避重连，超限才向浏览器上报关闭
+
 function classifyClose(code) {
   if (code === 1000 || code === 1001) return "passthrough";
   if (code === 4409) return "silent-reconnect";
   return "backoff-reconnect";
 }
 
-// ─── /api/ws 控制通道「秒关重连风暴」诊断（仅观测，不改变任何反代行为）───
-// 单窗口下上游常以 code=1000 秒关控制通道，官方 SPA 随即无限重连直至卡死。
-// 现有日志看不出单连接存活时长与单位时间重连频次，此处补齐这两项确证数据。
+
 const CTRL_WS_DIAG_WINDOW_MS = 10000;   // 重连次数统计的滚动窗口
 const CTRL_WS_SHORT_LIFE_MS = 2000;     // 判定「秒关」的存活时长阈值
 const ctrlWsRecentCloses = [];          // 近期秒关时刻（毫秒时间戳），仅诊断用
 
-// token 脱敏：仅保留首尾各若干位，避免诊断日志泄露完整凭证
+// 
 function maskToken(token) {
   if (!token) return "none";
   const s = String(token);
   if (s.length <= 8) return s.slice(0, 2) + "…";
   return s.slice(0, 4) + "…" + s.slice(-4);
+}
+
+// 掩码 URL 查询串中的 token=... 明文（日志打印 targetUrl 前调用，避免会话 token 落进 monitor.log）
+function maskUrlToken(url) {
+  return String(url || "").replace(/([?&]token=)[^&]*/g, "$1***");
 }
 
 function wrapDashboardProxy(ws, upstreamFactory, opts = {}) {
@@ -643,9 +744,7 @@ function wrapDashboardProxy(ws, upstreamFactory, opts = {}) {
   let clientPingTimer = null, clientPongTimer = null, reconnectTimer = null;
   let clearUpstreamTimers = () => {};
 
-  // ── /api/ws 控制通道诊断上下文（仅观测）──
-  // openTs 记录本连接首次建立时刻，供上游秒关时计算存活时长；
-  // ctrlWsDiag 仅在控制通道 /api/ws 时非空，避免污染 /api/events、/api/pty 日志。
+  // openTs 记录首次建立时刻
   const openTs = Date.now();
   let ctrlWsDiag = null;
   try {
@@ -659,7 +758,7 @@ function wrapDashboardProxy(ws, upstreamFactory, opts = {}) {
     }
   } catch {}
 
-  // 终止整条链路：清定时器、清队列、关掉真实上游（幂等）
+// 终止整条链路
   function shutdown() {
     if (state.closed) return;
     state.closed = true;
@@ -672,8 +771,7 @@ function wrapDashboardProxy(ws, upstreamFactory, opts = {}) {
     if (up && !up.isReconnectBuffer) { try { up.close(); } catch {} }
   }
 
-  // 重连窗口内的缓冲桩：readyState=1 让转发分支照常调用 send()，
-  // 消息进入队列；close() 表示浏览器侧主动断开，直接终止链路
+// 重连窗口内的缓冲桩
   function bufferStub() {
     return {
       readyState: 1,
@@ -693,8 +791,7 @@ function wrapDashboardProxy(ws, upstreamFactory, opts = {}) {
   function scheduleReconnect(kind, code, reason) {
     if (state.closed) return;
     if (state.attempts >= maxAttempts) {
-      // 重连彻底失败：丢弃缓冲并向浏览器上报关闭
-      // （1006/1005 等码不允许出现在主动发送的关闭帧里，统一用 1011）
+
       log(`[WS-PROXY] reconnect gave up after ${state.attempts} attempts (last code=${code})`);
       try { ws.close(1011, String(reason || "upstream unavailable")); } catch {}
       shutdown();
@@ -738,9 +835,9 @@ function wrapDashboardProxy(ws, upstreamFactory, opts = {}) {
       // 连上后才把真实上游暴露给转发分支，并把缓冲队列按原顺序补发
       ws.data.upstream = upstream;
       flushQueue(upstream);
-      // 连接稳定一段时间后重连计数归零，避免抖动/顶替循环耗尽次数
+// 连接稳定后重连计数归零
       stableTimer = setTimeout(() => { state.attempts = 0; }, stableResetMs);
-      // 上游侧 30s 心跳（抽象层无 ping 能力时自动跳过）
+
       if (typeof upstream.ping === "function") {
         upPingTimer = setInterval(() => {
           try { upstream.ping(); } catch { return; }
@@ -758,10 +855,24 @@ function wrapDashboardProxy(ws, upstreamFactory, opts = {}) {
     });
 
     upstream.addEventListener("message", (event) => {
-      try { ws.send(event.data); } catch {}
+      try {
+// Frame Type Preservation
+        const path = ws.data.targetUrl?.replace(/\?.*$/, "") || "unknown";
+        const isJsonPath = path.endsWith("/api/ws") || path.endsWith("/api/events");
+        
+        if (isJsonPath) {
+// Force text frame for JSON-RPC messages
+          const payload = Buffer.isBuffer(event.data) ? event.data.toString("utf8") : String(event.data);
+          ws.send(payload, { binary: false });
+        } else {
+// Preserve binary frame
+          ws.send(event.data, { binary: true });
+        }
+      } catch {}
     });
 
     upstream.addEventListener("close", (event) => {
+      // 连接断开时
       if (settled) return;
       settled = true;
       clearUp();
@@ -770,16 +881,13 @@ function wrapDashboardProxy(ws, upstreamFactory, opts = {}) {
       const reason = event && event.reason;
       const decision = classifyClose(code);
       log(`[WS-PROXY] upstream closed code=${code} → ${decision}`);
-      // ── /api/ws 控制通道秒关诊断（仅观测，不影响下方关闭/重连决策）──
-      // 上游以 code=1000 关闭且本连接存活不足阈值时，输出确证数据：脱敏 token、
-      // 请求 path（带 channel 参数时一并记录）、首次 open 时刻、关闭码与原因、
-      // 存活毫秒数，并附带近 10 秒滚动窗口内的秒关重连次数。
+      // ── /api/ws 控制通道秒关诊断 ──
       if (ctrlWsDiag && code === 1000) {
         const aliveMs = Date.now() - openTs;
         if (aliveMs < CTRL_WS_SHORT_LIFE_MS) {
           const now = Date.now();
           ctrlWsRecentCloses.push(now);
-          // 裁剪窗口外的历史项，避免数组无限增长
+
           while (ctrlWsRecentCloses.length && now - ctrlWsRecentCloses[0] > CTRL_WS_DIAG_WINDOW_MS) {
             ctrlWsRecentCloses.shift();
           }
@@ -796,11 +904,11 @@ function wrapDashboardProxy(ws, upstreamFactory, opts = {}) {
     });
 
     upstream.addEventListener("error", () => {
-      // 拨号失败/传输异常随后必有 close 事件走重连决策，这里仅吞掉避免未捕获异常
+      // 拨号失败或传输异常
     });
   }
 
-  // 浏览器侧 30s 心跳：pong 超时视为浏览器已死，终止链路
+// 浏览器侧心跳
   if (typeof ws.ping === "function") {
     clientPingTimer = setInterval(() => {
       try { ws.ping(); } catch { return; }
@@ -816,10 +924,10 @@ function wrapDashboardProxy(ws, upstreamFactory, opts = {}) {
       ws.on("pong", () => { clearTimeout(clientPongTimer); clientPongTimer = null; });
     }
   }
-  // 浏览器断开兜底清理（wsHandler close 分支之外再挂一道，幂等）
+
   if (typeof ws.on === "function") ws.on("close", () => shutdown());
 
-  // 首连前先挂缓冲桩：上游握手完成前浏览器发来的消息不丢
+// 首连前先挂缓冲桩
   ws.data.upstream = bufferStub();
   dial();
 

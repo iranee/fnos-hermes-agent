@@ -1632,7 +1632,7 @@
       var curEl = document.getElementById('updateCurrentVer');
       if (curEl && (curEl.textContent === '--' || curEl.textContent === '')) {
         apiGet('/api/status').then(function(s) {
-          if (s.gateway && s.gateway.version) curEl.textContent = s.gateway.version;
+          if (s.gateway && s.gateway.hermes) curEl.textContent = s.gateway.hermes;
         }).catch(function(){});
       }
     }
@@ -1713,7 +1713,7 @@
       setPorts(s.gateway && s.gateway.port, s.dashboard && s.dashboard.port);
 
       var hermesVersionEl = document.getElementById('hermesVersion');
-      if(hermesVersionEl) hermesVersionEl.textContent = (s.gateway && s.gateway.version) || '--';
+      if(hermesVersionEl) hermesVersionEl.textContent = (s.gateway && s.gateway.hermes) || '--';
 
       // Gateway 状态文本
       var gwStatusEl = document.getElementById('gwStatus');

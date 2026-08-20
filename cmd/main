@@ -69,8 +69,15 @@ log_msg "[环境] TRIM_PKGHOME=${TRIM_PKGHOME}"
 log_msg "[环境] DATA_DIR=${DATA_DIR}"
 export PATH="${DATA_DIR}/node/bin:/usr/local/bin:$PATH"
 VAR_DIR="${TRIM_PKGVAR}"
+export VAR_DIR APP_DIR
 MONITOR_SCRIPT="${TRIM_APPDEST}/server/monitor.js"
+# 引导进程：由 boot.js 独占 unix socket 并动态加载 monitor.js
+# 加载失败仍经 socket 提供诊断页 /debug（卡片式，内外网一致可访问）
+BOOT_SCRIPT="${TRIM_APPDEST}/server/boot.js"
 SOCKET_PATH="${TRIM_APPDEST}/hermes-agent.sock"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+DIAG_PID_FILE="${TRIM_PKGVAR}/diag.pid"
+LOG_FILE="${TRIM_PKGVAR}/info.log"
 
 log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}; }
 
@@ -135,12 +142,13 @@ start_process() {
 
     mkdir -p "${TRIM_PKGVAR}" 2>/dev/null
 
-    log_msg "Starting Hermes Agent monitor (socket mode) ..."
+    log_msg "Starting Hermes Agent (boot.js + monitor)..."
     log_msg "SOCKET_PATH=${SOCKET_PATH}"
-    log_msg "TRIM_APPDEST=${TRIM_APPDEST}"
     rm -f "${SOCKET_PATH}"
-
-    HOME="${DATA_DIR}" HERMES_HOME="${DATA_DIR}" APP_DIR="${TRIM_APPDEST}" DATA_DIR="${DATA_DIR}" VAR_DIR="${VAR_DIR}" MONITOR_SOCKET_PATH="${SOCKET_PATH}" BASE_PATH="/app/hermes-agent" PATH="${DATA_DIR}/venv/bin:${DATA_DIR}/node/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin" GATEWAY_PORT="${GATEWAY_PORT}" DASHBOARD_PORT="${DASHBOARD_PORT}" node "${MONITOR_SCRIPT}" >> ${LOG_FILE} 2>&1 &
+    
+    # 启动主引导进程 boot.js（独占 unix socket，动态加载 monitor.js）
+    # 诊断页已并入 boot.js，经 socket 对外提供（路径 /debug），内外网一致，无需独立端口进程
+    HOME="${DATA_DIR}" HERMES_HOME="${DATA_DIR}" APP_DIR="${TRIM_APPDEST}" DATA_DIR="${DATA_DIR}" VAR_DIR="${VAR_DIR}" MONITOR_SOCKET_PATH="${SOCKET_PATH}" BASE_PATH="/app/hermes-agent" PATH="${DATA_DIR}/venv/bin:${DATA_DIR}/node/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin" GATEWAY_PORT="${GATEWAY_PORT}" DASHBOARD_PORT="${DASHBOARD_PORT}" node "${BOOT_SCRIPT}" >> ${LOG_FILE} 2>&1 &
     printf "%s" "$!" > ${PID_FILE}
 
     # 等待 socket 创建（最多 5 秒）
@@ -161,7 +169,25 @@ start_process() {
 }
 
 stop_process() {
-    log_msg "Stopping Hermes Agent ..."
+    log_msg "Stopping Hermes Agent components..."
+    
+    # 1. 先停止独立诊断服务
+    if [ -r "${DIAG_PID_FILE}" ]; then
+        diag_pid=$(head -n 1 "${DIAG_PID_FILE}" | tr -d '[:space:]')
+        if kill -0 "${diag_pid}" 2>/dev/null; then
+            kill -TERM "${diag_pid}"
+            for i in $(seq 1 10); do
+                sleep 1
+                kill -0 "${diag_pid}" 2>/dev/null && continue
+                log_msg "诊断服务已停止"
+                break
+            done
+            kill -KILL "${diag_pid}" 2>/dev/null || true
+        fi
+        rm -f "${DIAG_PID_FILE}"
+    fi
+    
+    # 2. 再停止主引导进程
     if [ -r "${PID_FILE}" ]; then
         pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
         if kill -0 "${pid}" 2>/dev/null; then
@@ -174,9 +200,10 @@ stop_process() {
         fi
         rm -f "${PID_FILE}"
     fi
+    
     # 兜底：监控器卡死或 PID 文件丢失时，按路径模式清理残留子进程
-    # 先杀 main 进程本身
-    pkill -SIGKILL -f "hermes-agent.*(cmd/main|monitor\.js)" 2>/dev/null || true
+    # 先杀 main 进程本身（包含诊断服务）
+    pkill -SIGKILL -f "hermes-agent.*(cmd/main|boot\.js|monitor\.js|diagnostic-server\.js)" 2>/dev/null || true
     # 再杀 gateway|dashboard
     pkill -SIGKILL -f "hermes-agent.*(gateway|dashboard)" 2>/dev/null || true
     # 最后杀该目录下所有 python/node 子进程

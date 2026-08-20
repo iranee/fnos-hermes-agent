@@ -20,23 +20,75 @@ log_msg "TRIM_USERNAME=${TRIM_USERNAME:-<empty>}"
 log_msg "--- 目录状态 (安装前) ---"
 ls -la "${TRIM_APPDEST}" 2>&1 | while IFS= read -r line; do log_msg "  $line"; done
 
-# 强制 kill 可能残留的进程
-pkill -9 -f "(bun|node).*monitor\.js" 2>/dev/null || true
+# 优雅终止残留进程（给予 gracefulShutdown 时间执行清理）
+# 先尝试温和终止 (SIGTERM)，等待 1 秒后仍未退出的再强制杀死
+pkill -TERM -f "(bun|node).*(boot|monitor)\.js" 2>/dev/null || true
+sleep 1
+
+# 继续终止其他可能残留的进程
+pkill -TERM -f "hermes.*gateway" 2>/dev/null || true
+pkill -TERM -f "hermes.*dashboard" 2>/dev/null || true
+
+# 温和终止超时后，使用 SIGKILL 确保进程退出
+pkill -9 -f "(bun|node).*(boot|monitor)\.js" 2>/dev/null || true
 pkill -9 -f "hermes.*gateway" 2>/dev/null || true
 pkill -9 -f "hermes.*dashboard" 2>/dev/null || true
+
+# 按端口清理残留占用（补充按名 kill：进程名不匹配或孤儿进程仍占端口时兼顾）
+# Gateway 8642/28642, Dashboard 9119/29119
+kill_port() {
+    local port="$1"
+    # fuser 优先（最可靠）
+    if command -v fuser >/dev/null 2>&1; then
+        if fuser -k "${port}/tcp" 2>/dev/null; then
+            log_msg "fuser 已清理端口 ${port}"
+        fi
+    fi
+    # ss 兜底：解析 LISTEN 的 pid 并 kill
+    if command -v ss >/dev/null 2>&1; then
+        local pids
+        pids=$(ss -ltnpH "sport = :${port}" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u)
+        for pid in ${pids}; do
+            if kill -9 "${pid}" 2>/dev/null; then
+                log_msg "kill 端口 ${port} 占用进程 pid=${pid}"
+            fi
+        done
+    fi
+}
+for _port in 8642 28642 9119 29119; do
+    kill_port "${_port}"
+done
 
 # 等待进程完全退出（最多 10 秒），避免文件句柄残留导致 fnOS 权限设置失败
 _wait=0
 while [ ${_wait} -lt 10 ]; do
-    if ! pgrep -f "(bun|node).*monitor\.js" >/dev/null 2>&1 \
-       && ! pgrep -f "hermes.*gateway" >/dev/null 2>&1 \
-       && ! pgrep -f "hermes.*dashboard" >/dev/null 2>&1; then
+    _term_count=$(pgrep -f "(bun|node).*(boot|monitor)\.js" 2>/dev/null | wc -l)
+    _gw_count=$(pgrep -f "hermes.*gateway" 2>/dev/null | wc -l)
+    _dash_count=$(pgrep -f "hermes.*dashboard" 2>/dev/null | wc -l)
+    
+    if [ "${_term_count}" -eq 0 ] && [ "${_gw_count}" -eq 0 ] && [ "${_dash_count}" -eq 0 ]; then
+        log_msg "等待 ${_wait}s 后进程已全部退出"
         break
     fi
+    
     sleep 1
     _wait=$((_wait + 1))
 done
-log_msg "进程清理完成 (等待 ${_wait}s)"
+
+# 检查是否仍有残留进程
+if [ "${_wait}" -ge 10 ]; then
+    _final_term=$(pgrep -f "(bun|node).*(boot|monitor)\.js" 2>/dev/null | wc -l)
+    _final_gw=$(pgrep -f "hermes.*gateway" 2>/dev/null | wc -l)
+    _final_dash=$(pgrep -f "hermes.*dashboard" 2>/dev/null | wc -l)
+    _total=$(( _final_term + _final_gw + _final_dash ))
+    if [ "${_total}" -gt 0 ]; then
+        log_msg "警告：仍有 ${_total} 个进程残留 (${_final_term} monitor, ${_final_gw} gateway, ${_final_dash} dashboard)"
+    else
+        log_msg "等待 10s 后进程已全部退出"
+    fi
+else
+    log_msg "进程清理完成 (等待 ${_wait}s)"
+fi
 
 # 删除残留 socket
 rm -f "${TRIM_APPDEST}/hermes-agent.sock" 2>/dev/null || true

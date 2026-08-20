@@ -29,8 +29,57 @@ export HOME="${DATA_DIR}"
 # uv 缓存目录放到 DATA_DIR 下，确保和 venv 同一文件系统，hardlink 可用
 export UV_CACHE_DIR="${DATA_DIR}/.uv-cache"
 
-export PIP_INDEX_URL="https://mirrors.aliyun.com/pypi/simple/"
-export UV_INDEX_URL="https://mirrors.aliyun.com/pypi/simple/"
+# uv 缓存目录放到 DATA_DIR 下，确保和 venv 同一文件系统，hardlink 可用
+export UV_CACHE_DIR="${DATA_DIR}/.uv-cache"
+
+# PyPI 镜像探测（多国内镜像优先，官方兜底）—— UV_INDEX_URL 给 uv pip install 用
+# ---------------------------------------------------------------------------
+detect_pypi_mirror() {
+    log_msg "探测 PyPI 镜像源（多国内镜像优先，官方兜底）..."
+    local MIRROR_URL="" PROBE_PATH="/hermes-agent/"
+
+    # 按优先级定义候选镜像列表（name:url)
+    declare -a MIRRORS=(
+        "aliyun|https://mirrors.aliyun.com/pypi/simple/"
+        "tsinghua|https://pypi.tuna.tsinghua.edu.cn/simple/"
+        "tencent|https://mirrors.cloud.tencent.com/pypi/simple/"
+        "ustc|https://pypi.mirrors.ustc.edu.cn/simple/"
+        "official|https://pypi.org/simple/"
+    )
+
+    for entry in "${MIRRORS[@]}"; do
+        local name="${entry%%|*}"
+        local url="${entry##*|}"
+        # 探测 URL = base + hermes-agent/ （简单 index 目录存在性检查）
+        local probe_url="${url}${PROBE_PATH}"
+        
+        if curl -I --fail --max-time 8 -o /dev/null -sS "${probe_url}" 2>>"${LOG_FILE}"; then
+            MIRROR_URL="${url%/*}/"  # 去掉末尾的 hermes-agent/ 取 simple/ 根路径
+            SUCCESS=true
+            case "${name}" in
+                aliyun)      log_msg "使用镜像：阿里云" ;;
+                tsinghua)    log_msg "使用镜像：清华" ;;
+                tencent)     log_msg "使用镜像：腾讯" ;;
+                ustc)        log_msg "使用镜像：中科大" ;;
+                official)    log_msg "使用镜像：PyPI 官方" ;;
+            esac
+            break
+        fi
+    done
+
+    if [ -z "${MIRROR_URL}" ]; then
+        log_msg "错误：所有 PyPI 镜像均不可用，请检查网络连接"
+        return 1
+    fi
+
+    export PIP_INDEX_URL="${MIRROR_URL}"
+    export UV_INDEX_URL="${MIRROR_URL}"
+}
+
+# 初始化镜像策略
+if ! detect_pypi_mirror; then
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # curl 从阿里云 PyPI 镜像直接下载 uv wheel，unzip 提取二进制
@@ -119,47 +168,33 @@ fi
 log_msg "hermes-agent target version: ${HERMES_VERSION}"
 
 # ---------------------------------------------------------------------------
+# 2. 准备 uv 并软链进 venv
+# ---------------------------------------------------------------------------
+ensure_uv
+
+# ---------------------------------------------------------------------------
 # 2. 用 uv pip show 快速检测当前版本
 # ---------------------------------------------------------------------------
 ensure_uv
 
-# 把 uv 软链接进 venv/bin，让 hermes 运行时（PATH 仅含 venv/bin）能找到 uv
-# 放在版本检测之前，确保即使版本匹配提前退出也会执行
-if [ -x "${UV_BIN}/uv" ] && [ -d "${VENV_DIR}/bin" ]; then
-    ln -sf "${UV_BIN}/uv" "${VENV_DIR}/bin/uv"
-    if [ -x "${VENV_DIR}/bin/uv" ]; then
-        log_msg "uv symlinked into venv/bin"
-    else
-        log_msg "WARNING: uv symlink into venv/bin failed"
-    fi
-fi
-
 INSTALLED_VER=$("$UV" pip show --python "${VENV_DIR}/bin/python3" hermes-agent 2>/dev/null | grep -i '^version' | awk '{print $2}' || true)
 
-if [ -n "${INSTALLED_VER}" ] && [ "${INSTALLED_VER}" = "${HERMES_VERSION}" ]; then
-    # 版本匹配，再验证二进制能跑
-    if [ -x "${HERMES}" ] && timeout 10 "${HERMES}" --version >/dev/null 2>&1; then
-        log_msg "hermes OK: ${INSTALLED_VER} (matches target)"
+# 门控：如果本地已有版本高于 v0.19.0，不降级，直接跳过
+if [ -n "${INSTALLED_VER}" ]; then
+    INSTALLED_VER_NO_V="${INSTALLED_VER#v}"
+    TARGET_VER_NO_V="${HERMES_VERSION#v}"
+    
+    # sort -V 比较（升序），tail -1 = 最大值
+    if [ "$(printf '%s\n%s' "${INSTALLED_VER_NO_V}" "${TARGET_VER_NO_V}" | sort -V | tail -1)" = "${INSTALLED_VER_NO_V}" ]; then
+        log_msg "本地版本 ${INSTALLED_VER} >= 目标版本 ${HERMES_VERSION}，跳过升级（不降级）"
         trap - ERR
         log_msg "upgrade_callback finished (no action needed)."
         exit 0
     fi
-    log_msg "version matches but binary broken, will reinstall"
-elif [ -n "${INSTALLED_VER}" ] && [ "$(printf '%s\n%s' "${INSTALLED_VER}" "${HERMES_VERSION}" | sort -V | tail -1)" = "${INSTALLED_VER}" ]; then
-    # 本地版本 > 目标版本，不降级
-    log_msg "installed ${INSTALLED_VER} > target ${HERMES_VERSION}, skipping (no downgrade)"
-    trap - ERR
-    log_msg "upgrade_callback finished (no action needed)."
-    exit 0
-elif [ -n "${INSTALLED_VER}" ]; then
-    log_msg "version mismatch: installed=${INSTALLED_VER}, target=${HERMES_VERSION}"
+    log_msg "检测到旧版本 ${INSTALLED_VER} < 目标版本 ${HERMES_VERSION}，将升级"
 else
-    log_msg "hermes-agent not found in venv"
+    log_msg "未检测到已安装的 hermes-agent，将初始化安装"
 fi
-
-# ---------------------------------------------------------------------------
-# 3. 安装/升级 hermes-agent（uv pip install 覆盖装，不删 venv）
-# ---------------------------------------------------------------------------
 
 # 如果 venv 不存在或损坏，先重建
 if [ ! -d "${VENV_DIR}/bin" ] || [ ! -x "${VENV_DIR}/bin/python3" ]; then
@@ -171,32 +206,29 @@ if [ ! -d "${VENV_DIR}/bin" ] || [ ! -x "${VENV_DIR}/bin/python3" ]; then
     fi
     "$UV" venv --python /usr/bin/python3 "${VENV_DIR}" 2>>"${LOG_FILE}"
     if [ ! -d "${VENV_DIR}/bin" ]; then
-        toast_err "venv 创建失败: $(tail -5 "${LOG_FILE}" 2>/dev/null)"
+        toast_err "venv 创建失败：$(tail -5 "${LOG_FILE}" 2>/dev/null)"
         exit 1
     fi
     log_msg "venv created"
 fi
 
-log_msg ">>> 正在安装 hermes-agent[all]==${HERMES_VERSION}，依赖较多请耐心等待 ..."
-UV_INDEX_URL="https://mirrors.aliyun.com/pypi/simple/" \
-    "$UV" pip install --no-cache --python "${VENV_DIR}/bin/python3" "hermes-agent[all]==${HERMES_VERSION}" \
-    2>>"${LOG_FILE}" || true
+log_msg ">>> 正在从 PyPI 镜像安装 hermes-agent==${HERMES_VERSION}..."
+    # 覆盖安装不删 venv
+    "${UV}" pip install --no-cache --python "${VENV_DIR}/bin/python3" "hermes-agent[all]==${HERMES_VERSION}" \
+        2>>"${LOG_FILE}" || true
 
 # 覆盖安装可能失败 → 清 hermes 相关的 site-packages 再试
 if [ ! -f "${HERMES}" ]; then
     log_msg ">>> 首次安装失败，清理后重试 ..."
     rm -rf "${VENV_DIR}"/lib/python*/site-packages/hermes* 2>/dev/null || true
-    UV_INDEX_URL="https://mirrors.aliyun.com/pypi/simple/" \
-        "$UV" pip install --no-cache --python "${VENV_DIR}/bin/python3" "hermes-agent[all]==${HERMES_VERSION}" \
+    "${UV}" pip install --no-cache --python "${VENV_DIR}/bin/python3" "hermes-agent[all]==${HERMES_VERSION}" \
         2>>"${LOG_FILE}" || true
 
     if [ ! -f "${HERMES}" ]; then
-        toast_err "hermes-agent 安装失败: $(tail -5 "${LOG_FILE}" 2>/dev/null)"
+        toast_err "hermes-agent 安装失败：$(tail -5 "${LOG_FILE}" 2>/dev/null)"
         exit 1
     fi
 fi
-
-log_msg "hermes binary verified"
 
 ACTUAL_VER=$("$UV" pip show --python "${VENV_DIR}/bin/python3" hermes-agent 2>/dev/null | grep -i '^version' | awk '{print $2}' || echo "unknown")
 log_msg "hermes upgraded: ${ACTUAL_VER}"

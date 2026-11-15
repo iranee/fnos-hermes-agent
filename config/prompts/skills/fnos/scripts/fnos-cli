@@ -1,0 +1,214 @@
+#!/bin/sh
+# Generated from the packaged runtime manifest; no Node/npm required.
+set -eu
+ORIGINAL_UMASK=$(umask)
+umask 077
+COMMAND='fnos-cli'
+VERSION='0.6.2'
+PRODUCT='fnos'
+REPOSITORY='fnnas-labs/fnos-cli-skill'
+MANIFEST_HASH='bb5a171b24d3a7e69ec8144c0f2733222f737168e7999a76dc3fe4683b6cc707'
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+for tool in awk wc tr uname; do command -v "$tool" >/dev/null 2>&1 || fail "Missing required tool: $tool"; done
+if command -v sha256sum >/dev/null 2>&1; then HASH_TOOL=sha256sum
+elif command -v shasum >/dev/null 2>&1; then HASH_TOOL=shasum
+else fail 'A SHA-256 tool is required (sha256sum or shasum).'; fi
+hash_file() {
+ if [ "$HASH_TOOL" = sha256sum ]; then sha256sum < "$1"; else shasum -a 256 < "$1"; fi | awk '{print $1}'
+}
+[ -f "$SCRIPT_DIR/../runtime-manifest.json" ] && [ ! -L "$SCRIPT_DIR/../runtime-manifest.json" ] || fail 'Missing regular runtime manifest.'
+[ "$(hash_file "$SCRIPT_DIR/../runtime-manifest.json")" = "$MANIFEST_HASH" ] || fail 'Runtime manifest SHA256 mismatch.'
+case "$(uname -s):$(uname -m)" in
+ Darwin:arm64) PLATFORM=darwin-arm64 ;; Darwin:x86_64) PLATFORM=darwin-x64 ;;
+ Linux:aarch64|Linux:arm64) PLATFORM=linux-arm64 ;; Linux:x86_64) PLATFORM=linux-x64 ;;
+ *) fail 'Unsupported platform for this Skill.' ;;
+esac
+case "$PLATFORM" in
+  darwin-arm64) ASSET='fnos-cli-0.6.2-darwin-arm64.gz'; ARCHIVE_SIZE=3179654; ARCHIVE_HASH=27d34ccaa362af76b7166a7c65f6c9267540c3efac67835158f8ceb382649122; BINARY_SIZE=8095136; BINARY_HASH=a0a68f3e24d946300b3a770db8d6616709fd047def2e45db2573d026cd87d13d ;;
+  darwin-x64) ASSET='fnos-cli-0.6.2-darwin-x64.gz'; ARCHIVE_SIZE=3257605; ARCHIVE_HASH=9b83a262197e258c6aaf943a24ec22b3352a82187d99e401d2c99aaa219efbea; BINARY_SIZE=8812952; BINARY_HASH=d2228a8ff68174a215b044611bd855794eaff1e130dfc7a1e52f7189d6c5c450 ;;
+  linux-arm64) ASSET='fnos-cli-0.6.2-linux-arm64.gz'; ARCHIVE_SIZE=2989593; ARCHIVE_HASH=db7d7a1ecac51bf1213b1b3a7eee77e14b5d16604ace00f83ba6587dad649ebc; BINARY_SIZE=6556400; BINARY_HASH=be0ae717c115b3f621ef18a12b884684b062e58ec796b0d018d7ab0c1d604e0c ;;
+  linux-x64) ASSET='fnos-cli-0.6.2-linux-x64.gz'; ARCHIVE_SIZE=3129409; ARCHIVE_HASH=f3233408662bf667355135771ce0d6db856ef334f16c5a552a53970976ffdc79; BINARY_SIZE=7643304; BINARY_HASH=08e6cd9f3017ce55b6d864ab304aba9d054b6a2af9d421a648e4d13ac62b0572 ;;
+esac
+# Preserve the independent Skill's existing capability boundary.
+skip=0
+for arg do
+ if [ "$skip" = 1 ]; then skip=0; continue; fi
+ case "$arg" in
+  --host|--port|--profile|--scheme) skip=1 ;;
+  --*) ;;
+  media) printf '%s\n' 'Media commands are not available in this skill package.' >&2; exit 2 ;;
+  *) break ;;
+ esac
+done
+case "$PLATFORM" in
+ darwin-*) BASE="${HOME:?HOME is required}/Library/Caches" ;;
+ *) BASE=${XDG_CACHE_HOME:-"${HOME:?HOME is required}/.cache"} ;;
+esac
+case "$BASE" in /*) ;; *) fail 'User cache directory must be an absolute path.' ;; esac
+CACHE="$BASE/$COMMAND/$VERSION/$PLATFORM"
+BINARY="$CACHE/$COMMAND"
+LOCK="$CACHE.lock"
+# Check every existing ancestor; mkdir -p by itself follows symlinks.
+safe_directory() {
+ [ ! -L "$1" ] || fail "Unsafe runtime cache directory: $1"
+ if [ -e "$1" ]; then [ -d "$1" ] || fail "Not a runtime directory: $1"; return; fi
+ parent=$(dirname -- "$1")
+ [ "$parent" = "$1" ] || safe_directory "$parent"
+ mkdir "$1" 2>/dev/null || [ -d "$1" ] || fail "Cannot create runtime directory: $1"
+ [ ! -L "$1" ] || fail "Unsafe runtime cache directory: $1"
+}
+# Recursion uses positional parameters, not shared local state.
+check_ancestors() {
+ [ ! -L "$1" ] || fail "Unsafe runtime cache directory: $1"
+ [ "$1" = / ] && return
+ check_ancestors "$(dirname -- "$1")"
+}
+check_ancestors "$BASE/$COMMAND/$VERSION"
+safe_directory "$BASE/$COMMAND/$VERSION"
+size_file() { wc -c < "$1" | tr -d '[:space:]'; }
+verify_file() {
+ [ -f "$1" ] && [ ! -L "$1" ] || fail "Not a regular runtime file: $1"
+ [ "$(size_file "$1")" = "$2" ] && [ "$(hash_file "$1")" = "$3" ] || fail "Runtime SHA256 mismatch: $1. Remove its cache directory after confirming no initialization is running, then retry."
+}
+ready() {
+ [ ! -L "$CACHE" ] || fail "Unsafe runtime cache: $CACHE"
+ [ -e "$CACHE" ] || return 1
+ [ -d "$CACHE" ] && [ -f "$BINARY" ] || fail "Incomplete runtime cache: $CACHE. Remove it after confirming no initialization is running, then retry."
+ verify_file "$BINARY" "$BINARY_SIZE" "$BINARY_HASH"
+ [ -x "$BINARY" ] || fail "Runtime is not executable: $BINARY"
+}
+launch() { umask "$ORIGINAL_UMASK"; export TRIM_CLI_DISTRIBUTION="$PRODUCT"; exec "$BINARY" "$@"; }
+if ready; then launch "$@"; fi
+for tool in curl gzip head mkfifo od sed mkdir chmod rm mv cat sleep; do command -v "$tool" >/dev/null 2>&1 || fail "Missing required tool: $tool"; done
+waited=0
+while ! mkdir "$LOCK" 2>/dev/null; do
+ [ ! -L "$LOCK" ] || fail "Unsafe initialization lock: $LOCK"
+ [ ! -e "$LOCK" ] || [ -d "$LOCK" ] || fail "Cannot create initialization lock: $LOCK"
+ if ready; then launch "$@"; fi
+ [ "$waited" -lt 60 ] || fail "CLI initialization is locked: $LOCK. Remove this lock only after confirming its initializer has stopped."
+ sleep 1; waited=$((waited+1))
+done
+chmod 700 "$LOCK" || { rm -rf "$LOCK"; fail "Cannot secure initialization lock."; }
+OWNER="$$-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+printf '%s\n' "$OWNER" > "$LOCK/owner" || { rm -rf "$LOCK"; fail "Cannot record initialization owner."; }
+producer=; consumer=; timer=; writer=
+cleanup() {
+ for job in "$producer" "$consumer" "$timer" "$writer"; do
+  if [ -n "$job" ]; then kill -KILL "$job" 2>/dev/null || :; wait "$job" 2>/dev/null || :; fi
+ done
+ if [ -d "$LOCK" ] && [ ! -L "$LOCK" ] && [ -f "$LOCK/owner" ] && [ ! -L "$LOCK/owner" ] && [ "$(cat "$LOCK/owner")" = "$OWNER" ]; then rm -rf "$LOCK"; fi
+}
+trap cleanup EXIT
+terminate() { cleanup; trap - EXIT INT TERM HUP; kill -s "$1" "$$"; }
+trap 'terminate INT' INT
+trap 'terminate TERM' TERM
+trap 'terminate HUP' HUP
+if ready; then cleanup; trap - EXIT INT TERM HUP; launch "$@"; fi
+printf 'Downloading %s %s (%s)...\n' "$COMMAND" "$VERSION" "$PLATFORM" >&2
+# A restricted URL parser: never evaluate user configuration as shell code.
+# mode=registry also removes default ports/trailing slashes and skips npmjs.
+url_parse() {
+ printf '%s\n' "$1" | awk -v mode="$2" '
+ function bad(){invalid=1;exit 1}
+ NR>1 {bad()}
+ /[[:space:]\\]/ {bad()}
+ {s=$0; if(tolower(substr(s,1,8))!="https://")bad(); s=substr(s,9);
+  if(s=="" || s~/^[\/?#]/)bad(); a=s; sub(/[\/?#].*$/,"",a); p=substr(s,length(a)+1);
+  if(a~/@/ || (mode=="registry" && p~/[?#]/))bad(); a=tolower(a);
+  port=""; host=a;
+  if(a~/^\[/){i=index(a,"]");if(!i)bad();host=substr(a,1,i);tail=substr(a,i+1);if(tail!="" && tail!~/^:[0-9]+$/)bad();port=substr(tail,2);if(host!~/^\[[0-9a-f:.]+\]$/)bad()}
+  else {if(a~/[^a-z0-9.:-]/)bad(); n=split(a,parts,":");if(n>2 || parts[1]=="")bad();host=parts[1];if(n==2){port=parts[2];if(port!~/^[0-9]+$/)bad()}}
+  if(port!="" && (port+0>65535 || port+0<0))bad(); if(port!="")port=sprintf("%d",port);
+  a=host;if(port!="" && port!="443")a=a ":" port;
+  if(mode=="registry"){if(host=="registry.npmjs.org")bad();sub(/\/+$/,"",p)}
+  result="https://" a p;
+ }
+ END {if(!invalid && NR==1)print result}'
+}
+REGISTRY=
+if [ "${npm_config_registry+x}" = x ]; then REGISTRY=$npm_config_registry
+elif command -v npm >/dev/null 2>&1; then
+ # npm alone interprets its user/project config; stop reading it after 5 seconds.
+ npm config get registry > "$LOCK/registry" 2>/dev/null & producer=$!
+ (sleep 5; kill "$producer" 2>/dev/null || :) >/dev/null 2>&1 & timer=$!
+ if wait "$producer"; then REGISTRY=$(cat "$LOCK/registry"); fi
+ producer=; kill "$timer" 2>/dev/null || :; wait "$timer" 2>/dev/null || :; timer=
+fi
+CUSTOM=$(url_parse "$REGISTRY" registry) || CUSTOM=
+PUBLIC="https://registry.npmmirror.com/-/binary/$COMMAND/v$VERSION/$ASSET"
+[ -z "$CUSTOM" ] || CUSTOM="$CUSTOM/-/binary/$COMMAND/v$VERSION/$ASSET"
+# Resolve relative Location values without allowing an HTTP/userinfo redirect.
+redirect_url() {
+ case "$2" in
+  [Hh][Tt][Tt][Pp][Ss]://*) url_parse "$2" redirect ;;
+  //*) url_parse "https:$2" redirect ;;
+  \?*) previous=${1%%\?*}; url_parse "$previous$2" redirect ;;
+  /*) origin=${1#https://}; origin=${origin%%/*}; url_parse "https://$origin$2" redirect ;;
+  *) case "$2" in *:*) return 1;; esac; previous=${1%%\?*}; url_parse "${previous%/*}/$2" redirect ;;
+ esac
+}
+# FIFO sinks bound unknown-length responses even on older curl implementations.
+# Child PIDs remain owned by this shell so signal cleanup closes the transport.
+download_source() {
+ url=$1; hops=0
+ while :; do
+  rm -f "$LOCK/stream" "$LOCK/payload.gz" "$LOCK/headers" "$LOCK/status" || fail "Cannot reset download files."
+  : > "$LOCK/headers" || fail "Cannot create download headers."
+  : > "$LOCK/status" || fail "Cannot create download status."
+  mkfifo "$LOCK/stream" || fail 'Cannot create download stream.'
+  (trap - EXIT INT TERM HUP; exec head -c "$((ARCHIVE_SIZE+1))" < "$LOCK/stream" > "$LOCK/payload.gz") & consumer=$!
+  curl -q --silent --fail --proto '=https' --connect-timeout 10 --max-time 30 --max-filesize "$((ARCHIVE_SIZE+1))" --user-agent platform-cli-bootstrap --header 'Accept: application/octet-stream' --dump-header "$LOCK/headers" --write-out '%{http_code}' --output "$LOCK/stream" "$url" > "$LOCK/status" 2>/dev/null & producer=$!
+  rc=0; wait "$producer" || rc=$?; producer=
+  # Curl may finish without opening its output (e.g. an HTTP error).
+  # A zero-byte writer releases that reader; if it already exited, reap the
+  # blocked writer after waiting for the real bounded sink to finish.
+  (trap - EXIT INT TERM HUP; : > "$LOCK/stream") & writer=$!
+  sink=0; wait "$consumer" || sink=$?; consumer=
+  kill -KILL "$writer" 2>/dev/null || :; wait "$writer" 2>/dev/null || :; writer=
+  rm -f "$LOCK/stream"
+  actual=$(size_file "$LOCK/payload.gz")
+  [ "$actual" -le "$ARCHIVE_SIZE" ] && [ "$rc" -ne 63 ] || fail 'Runtime asset exceeds its fixed size.'
+  [ "$rc" -ne 23 ] || fail 'Cannot write runtime download.'
+  [ "$rc" -eq 0 ] || return 1
+  [ "$sink" -eq 0 ] || fail 'Cannot write runtime download.'
+  code=$(cat "$LOCK/status")
+  case "$code" in
+   200) [ "$actual" = "$ARCHIVE_SIZE" ] || fail 'Runtime asset size does not match its fixed manifest.'; return 0 ;;
+   301|302|303|307|308)
+    [ "$hops" -lt 5 ] || return 1
+    location=$(awk 'tolower($0)~/^location:/ {sub(/^[^:]*:[ \t]*/,"");sub(/\r$/,"");value=$0}END{print value}' "$LOCK/headers")
+    [ -n "$location" ] || return 1
+    url=$(redirect_url "$url" "$location") || return 1; hops=$((hops+1)) ;;
+   *) return 1 ;;
+  esac
+ done
+}
+found=0
+for source in github configured public; do
+ case "$source" in
+  github) URL="https://github.com/$REPOSITORY/releases/download/v$VERSION/$ASSET"; LABEL=GitHub ;;
+  configured) [ -n "$CUSTOM" ] || continue; URL=$CUSTOM; LABEL='configured mirror' ;;
+  public) [ "$CUSTOM" != "$PUBLIC" ] || continue; URL=$PUBLIC; LABEL=npmmirror ;;
+ esac
+ if download_source "$URL"; then found=1; break; fi
+ printf 'Download from %s failed; trying next available source.\n' "$LABEL" >&2
+done
+[ "$found" = 1 ] || fail 'All configured sources failed. Retry when a source is available.'
+verify_file "$LOCK/payload.gz" "$ARCHIVE_SIZE" "$ARCHIVE_HASH"
+mkdir "$LOCK/ready"
+mkfifo "$LOCK/stream"
+(trap - EXIT INT TERM HUP; exec head -c "$((BINARY_SIZE+1))" < "$LOCK/stream" > "$LOCK/ready/$COMMAND") & consumer=$!
+(trap - EXIT INT TERM HUP; exec gzip -dc "$LOCK/payload.gz" > "$LOCK/stream" 2>/dev/null) & producer=$!
+rc=0; wait "$producer" || rc=$?; producer=
+sink=0; wait "$consumer" || sink=$?; consumer=
+[ "$(size_file "$LOCK/ready/$COMMAND")" -le "$BINARY_SIZE" ] || fail 'Runtime binary exceeds its fixed size.'
+[ "$rc" -eq 0 ] && [ "$sink" -eq 0 ] || fail 'Cannot decompress runtime asset.'
+verify_file "$LOCK/ready/$COMMAND" "$BINARY_SIZE" "$BINARY_HASH"
+chmod 755 "$LOCK/ready/$COMMAND"
+[ -x "$LOCK/ready/$COMMAND" ] || fail 'Runtime is not executable.'
+[ ! -e "$CACHE" ] && [ ! -L "$CACHE" ] || fail "Runtime cache appeared during initialization: $CACHE"
+mv "$LOCK/ready" "$CACHE"
+cleanup
+trap - EXIT INT TERM HUP
+launch "$@"

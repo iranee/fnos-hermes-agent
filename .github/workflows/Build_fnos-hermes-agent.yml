@@ -11,11 +11,6 @@ on:
         description: 'Application version <core>-<serial> (required when the core changes, e.g. 0.23.1-022)'
         required: false
         type: string
-      publish:
-        description: 'Publish a new GitHub Release after successful tests'
-        required: true
-        default: false
-        type: boolean
   push:
     tags:
       - 'fnos-hermes-agent_v*'
@@ -145,8 +140,7 @@ jobs:
           match = re.search(r'^## ' + re.escape(version) + r'(?:[ （(][^\n]*)?\n(.*?)(?=^## |\Z)', text, re.M | re.S)
           body = match.group(1).strip() if match else ''
           footer = '安装包：_x86_64 适用于 x86_64（Intel/AMD）设备，_arm64 适用于 ARM（aarch64）设备。内置 Hermes 内核 ' + os.environ['NOTES_CORE'] + '，运行环境在安装时联网下载，不含可选备份模块。'
-          # An empty file tells the release job that this version has no changelog entry.
-          Path('dist/release-notes.md').write_text(body + '\n\n' + footer + '\n' if body else '', encoding='utf-8')
+          Path('dist/release-notes.md').write_text((body + '\n\n' if body else '') + footer + '\n', encoding='utf-8')
           PY
       - uses: actions/upload-artifact@v7.0.2
         with:
@@ -162,7 +156,7 @@ jobs:
 
   release:
     needs: build
-    if: github.event_name == 'push' || inputs.publish == true
+    if: success()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -172,7 +166,7 @@ jobs:
         with:
           name: fnos-hermes-agent-${{ needs.build.outputs.version }}
           path: release
-      - name: Publish new release without replacing existing assets
+      - name: Create draft release without replacing existing assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -182,7 +176,7 @@ jobs:
         working-directory: release
         run: |
           set -euo pipefail
-          test -s release-notes.md || { echo "::error::CHANGELOG.md 缺少版本 ${RELEASE_VERSION} 的更新日志，拒绝发布"; exit 1; }
+          test -s release-notes.md || { echo "::error::缺少草稿安装说明文件 release-notes.md"; exit 1; }
           for a in x86_64 arm64; do sha256sum --check "fnos-hermes-agent_v${RELEASE_VERSION}_$a.fpk.sha256"; done
           python3 - <<'PY'
           import json, os, urllib.error, urllib.request

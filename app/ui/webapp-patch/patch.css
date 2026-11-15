@@ -1,0 +1,281 @@
+/* fnOS 面板注入内置 Hermes WebApp 的界面补丁（由 webapp-proxy 注入，不改动 hermes-src）。
+   每条修补标注上游版本与对应结构，上游更新后逐条核对。补丁版本：8。 */
+
+/* v0.23.1 backend UpdateStatusCard：后端更新在 WebApp 中停用。隐藏原状态行与
+   「立即检查 / 更新 / 查看新内容」操作区，只显示补丁写入的当前后端版本。 */
+html[data-hermes-desktop-host="browser"] [data-fnos-update-disabled] {
+  border-color: var(--border, #6b7280) !important;
+  background: var(--muted, #202329) !important;
+  color: var(--foreground, #f3f4f6) !important;
+}
+html[data-hermes-desktop-host="browser"] [data-fnos-update-disabled] > :not([data-fnos-update-view]) { display: none !important; }
+[data-fnos-update-view] p { margin-bottom: 0; }
+
+/* 原 compact label 只在手机显示，桌面仍保持上游 square。 */
+[data-fnos-model-name] { display: none; }
+@media (max-width: 639.98px) {
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-pill] {
+    width: auto !important;
+    min-width: 44px;
+    min-height: 44px;
+    max-width: 100%;
+    flex-shrink: 1 !important;
+    justify-content: flex-start;
+    gap: 4px !important;
+    padding: 0 8px !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-name] {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 16px;
+    line-height: 1.25;
+  }
+  html[data-hermes-desktop-host="browser"] input[data-fnos-model-search] {
+    box-sizing: border-box;
+    width: 100%;
+    height: 44px !important;
+    min-height: 44px;
+    min-width: 44px;
+    font-size: 16px !important;
+    line-height: normal !important;
+    touch-action: manipulation;
+  }
+  /* 手机上模型菜单放宽加高，选项不低于 44px 便于点按。 */
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-menu] {
+    width: min(420px, calc(100vw - 16px)) !important;
+    max-width: calc(100vw - 16px) !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-menu] [class*="max-h-[max(150px,30dvh)]"] {
+    max-height: max(240px, 52dvh) !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-menu] :is([role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]) {
+    min-height: 44px;
+    font-size: 15px !important;
+    line-height: 1.3 !important;
+    padding-top: 6px !important;
+    padding-bottom: 6px !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-menu] [data-slot="dropdown-menu-label"] {
+    font-size: 12px !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-slot="dropdown-menu-search"]:has(> [data-fnos-model-close]) {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding-right: 6px !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-close] {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--ui-text-secondary);
+    cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* 视觉上是 26px 的圆圈，外圈留足 36px 点按区域。 */
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-close] > svg {
+    box-sizing: content-box;
+    padding: 5px;
+    border: 1px solid var(--ui-stroke-secondary, currentColor);
+    border-radius: 50%;
+    background: var(--ui-control-hover-background, transparent);
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-close]:active > svg {
+    background: var(--ui-control-active-background, transparent);
+    color: var(--ui-text-primary, currentColor);
+  }
+  /* 收藏星：放大图标和点按区，与模型名留出间距。 */
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-menu] [role="menuitem"] > button[aria-pressed][type="button"] {
+    width: 32px !important;
+    height: 32px !important;
+    margin: -6px 4px -6px -8px !important;
+    touch-action: manipulation;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-menu] [role="menuitem"] > button[aria-pressed][type="button"] > i.codicon {
+    font-size: 17px !important;
+  }
+  /* 窄屏下父菜单已占满宽度，Radix 把二级菜单放在左右任一侧都会出屏，改为屏内铺满、垂直居中。 */
+  html[data-hermes-desktop-host="browser"] [data-radix-popper-content-wrapper]:has(> [data-fnos-model-submenu]) {
+    left: 8px !important;
+    right: 8px !important;
+    top: 50% !important;
+    min-width: 0 !important;
+    transform: translateY(-50%) !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-submenu] {
+    width: 100%;
+    max-width: none !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-submenu] :is([role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]) {
+    min-height: 44px;
+    font-size: 15px !important;
+    line-height: 1.3 !important;
+    padding-top: 6px !important;
+    padding-bottom: 6px !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-submenu] [data-slot="dropdown-menu-label"] {
+    font-size: 12px !important;
+  }
+}
+[data-fnos-model-close] { display: none; }
+
+/* v0.23.1 composer 的听写/语音入口。保留正在录音时的停止控件。 */
+html[data-hermes-desktop-host="browser"]:not([data-fnos-voice-entries="available"]) [data-slot="composer-root"]
+  [data-slot="fan-menu-anchor"]:has(> button[aria-pressed="false"]),
+html[data-hermes-desktop-host="browser"]:not([data-fnos-voice-entries="available"]) [data-slot="composer-root"]
+  span.flex.items-center:has(> button[data-size="icon"] > svg.tabler-icon-wave-sine),
+html[data-hermes-desktop-host="browser"]:not([data-fnos-voice-entries="available"]) [data-slot="composer-root"]
+  [class~="gap-(--composer-control-gap)"] > button[data-size="icon"][aria-haspopup="menu"]:has(> .codicon-mic, > .tabler-icon-ear) {
+  display: none !important;
+}
+
+/* 上下两区分别滚动，避免恢复按钮遮住根错误页的按钮和详情。 */
+html[data-hermes-desktop-host="browser"] body:has(> [data-fnos-crash-recovery]) {
+  --fnos-crash-recovery-space: min(10rem, 40vh);
+}
+html[data-hermes-desktop-host="browser"] body:has(> [data-fnos-crash-recovery])
+  div[data-glass-opaque].fixed.inset-0[class~="z-(--z-crash)"] {
+  bottom: var(--fnos-crash-recovery-space) !important;
+  overflow: auto;
+  align-items: safe center;
+  overscroll-behavior: contain;
+}
+[data-fnos-crash-recovery] { display: none; }
+html[data-hermes-desktop-host="browser"] body > [data-fnos-crash-recovery] {
+  display: block;
+  position: fixed;
+  inset: auto 0 0;
+  z-index: var(--z-crash, 2147482999);
+  box-sizing: border-box;
+  height: var(--fnos-crash-recovery-space);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 12px max(16px, env(safe-area-inset-right, 0px)) max(12px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+  border-top: 1px solid var(--border, #6b7280);
+  background: var(--ui-chat-surface-background, #181b20);
+  color: var(--foreground, #f3f4f6);
+  font: 14px/1.5 system-ui, sans-serif;
+  text-align: center;
+}
+[data-fnos-crash-recovery] p { margin: 0 0 8px; }
+[data-fnos-crash-recovery] > div {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+[data-fnos-crash-recovery] :is(button, a) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 44px;
+  min-height: 44px;
+  max-width: 100%;
+  padding: 8px 14px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+[data-fnos-crash-recovery] :is(button, a):focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
+[data-fnos-crash-recovery] :is(button, a):hover { text-decoration: underline; }
+@media (max-width: 639.98px) {
+  html[data-hermes-desktop-host="browser"] body:has(> [data-fnos-crash-recovery]) {
+    --fnos-crash-recovery-space: min(13rem, 40vh);
+  }
+  [data-fnos-crash-recovery] :is(button, a) { width: 100%; }
+}
+
+/* ---- 修补 3：上游 v0.23.1 应用本体卸载入口，不影响技能/插件卸载 ----
+   overlay-split-layout.tsx 的稳定 data-tour。窄屏 portal 行由 patch.js 关联后标记。
+   command-palette 的 data-value 后缀是 U+0001 + 稳定 id。\1 后空格为 CSS 转义终止符。
+   不按显示文字匹配，不隐藏整个 About 分组或任意其他 menuitem。 */
+html[data-hermes-desktop-host="browser"] aside[data-tour="overlay-nav"] button[data-tour="nav-about:uninstall"],
+html[data-hermes-desktop-host="browser"] [role="dialog"] [data-slot="command"] [data-slot="command-list"]
+  [data-slot="command-item"][cmdk-item][data-value$="\1 sp-settings-page:about:uninstall"],
+html[data-hermes-desktop-host="browser"] [data-fnos-uninstall-nav] {
+  display: none !important;
+}
+
+/* ---- 修补 1：触屏布局下用户消息的「编辑 / 展开 / 恢复到此检查点」按钮 ----
+   上游 v0.23.0 user-message.tsx：触屏（browser 宿主 + hover:none / pointer:coarse）时
+   TouchUserBubble 在气泡下方常驻一行 expand/edit 按钮，UserBubbleActions 的恢复按钮常驻显示。
+   这里改成：默认隐藏，点一下气泡后（patch.js 给消息根加 data-fnos-reveal）以桌面端的方式
+   浮在气泡右下角；再点气泡或点别处收起。 */
+@media (hover: none), (pointer: coarse) {
+  /* 触屏按钮行：直接子元素带 aui_user-touch-edit / aui_user-touch-expand 的那一行 */
+  html[data-hermes-desktop-host="browser"] [data-slot="aui_user-message-root"]
+    div:has(> [data-slot="aui_user-touch-edit"], > [data-slot="aui_user-touch-expand"]) {
+    display: none;
+  }
+  /* 恢复按钮所在的角落簇（带 codicon-discard），只含「停止」的簇保持常显 */
+  html[data-hermes-desktop-host="browser"] [data-slot="aui_user-message-root"]
+    div.absolute:has(.codicon-discard) {
+    display: none;
+  }
+
+  /* Stop-only 也需容纳 44px 热区。:where 使下方 reveal 的右内边距仍可覆盖。 */
+  html[data-hermes-desktop-host="browser"] [data-slot="aui_user-message-root"]
+    div.relative:where(:has(> div.absolute .tabler-icon-player-stop-filled)) > [data-selectable-text="true"] {
+    min-height: 3.5rem;
+    padding-right: 4rem;
+  }
+
+  html[data-hermes-desktop-host="browser"] [data-slot="aui_user-message-root"][data-fnos-reveal]
+    div:has(> [data-slot="aui_user-touch-edit"], > [data-slot="aui_user-touch-expand"]) {
+    display: flex;
+    position: absolute;
+    right: 0.5rem;
+    bottom: 0.5rem;
+    z-index: 10;
+    gap: 0.125rem;
+    padding: 0 0 0 0.25rem;
+    border-radius: 0.375rem;
+    background: var(--dt-user-bubble);
+  }
+  html[data-hermes-desktop-host="browser"] [data-slot="aui_user-message-root"][data-fnos-reveal]
+    div.relative > [data-selectable-text="true"] {
+    min-height: 3.5rem;
+    padding-right: 7rem;
+  }
+  html[data-hermes-desktop-host="browser"] [data-slot="aui_user-message-root"][data-fnos-reveal]
+    div.relative:has(> div > [data-slot="aui_user-touch-expand"]) > [data-selectable-text="true"] {
+    padding-right: 10rem;
+  }
+  /* 恢复或停止角落簇与按钮行并排：簇在最右（44px + 4px 内边距），按钮行紧贴其左 */
+  html[data-hermes-desktop-host="browser"] [data-slot="aui_user-message-root"][data-fnos-reveal]
+    div.relative:has(> div.absolute .codicon-discard, > div.absolute .tabler-icon-player-stop-filled)
+    > div:has(> [data-slot="aui_user-touch-edit"], > [data-slot="aui_user-touch-expand"]) {
+    right: 3.5rem;
+  }
+  html[data-hermes-desktop-host="browser"] [data-slot="aui_user-message-root"][data-fnos-reveal]
+    div.absolute:has(.codicon-discard) {
+    display: flex;
+  }
+}
+
+/* 新版 Chromium 会让对话滚动区等大容器可被聚焦，新建窗口（?win=secondary）里它们先拿到焦点，默认焦点环画成整块黑色双线框 */
+:is(#root, main, [data-slot="aui_thread-viewport"], [data-slot="aui_thread-content"], [data-slot="aui_thread-root"]):is(:focus, :focus-visible) {
+  outline: none !important;
+}

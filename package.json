@@ -1,0 +1,15 @@
+{
+  "name": "fnos-hermes-agent-build",
+  "version": "0.23.0-117",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "scripts": {
+    "build:qr": "node scripts/build-qr.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "jsdom": "26.1.0",
+    "qrcode": "1.5.4"
+  }
+}

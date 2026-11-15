@@ -1,1 +1,0 @@
-import{n as e}from"./rolldown-runtime-CbXtAM7H.js";import{m as t}from"./react-vendor-B6GYCG81.js";var n=e(t(),1),r=(0,n.createContext)({profile:``,currentProfile:`default`,profiles:[],setProfile:()=>{}});function i(){return(0,n.useContext)(r)}export{r as n,i as t};

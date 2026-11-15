@@ -1,23 +1,143 @@
 #!/bin/bash
+# BEGIN shared hook logging：以下公共日志块在六个钩子中保持一致。
+HOOK_LOG_FILE=/tmp/install_hermes_agent.log
+HOOK_NAME="${0##*/}"
+HOOK_STAGE=logging
+HOOK_LOG_READY=0
+exec {HOOK_ORIGINAL_STDERR}>&2
+
+hook_append_toast() {
+    local file="${TRIM_TEMP_LOGFILE:-}"
+    [[ -n "$file" ]] || return 0
+    if [[ -L "$file" || ( -e "$file" && ! -f "$file" ) ]]; then
+        printf 'ERROR: refusing non-regular fnOS toast file: %s\n' "$file" >&2
+        return 0
+    fi
+    # 只追加，不覆盖 fnOS 或 helper 已写入的更具体提示。
+    { if [[ -s "$file" ]]; then printf '\n'; fi; printf '%s\n' "$*"; } >> "$file" ||
+        printf 'ERROR: cannot append fnOS failure notice: %s\n' "$file" >&2
+    return 0
+}
+
+hook_record() {
+    printf '%s [%s] %s rc=%s stage=%s uid=%s TRIM_APPDEST=%q TRIM_PKGHOME=%q TRIM_PKGVAR=%q\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S%z')" "$HOOK_NAME" "$1" "$2" "$HOOK_STAGE" "$EUID" \
+        "${TRIM_APPDEST:-}" "${TRIM_PKGHOME:-}" "${TRIM_PKGVAR:-}"
+}
+
+# 失败时摘录本次运行写入日志的最后几行，让 fnOS 对话框直接显示具体原因。
+hook_log_excerpt() {
+    local line toast="${TRIM_TEMP_LOGFILE:-}"
+    local -a lines=()
+    [[ "$HOOK_LOG_READY" == 1 && -r "$HOOK_LOG_FILE" ]] || return 0
+    while IFS= read -r line; do
+        if [[ "$line" == *" [$HOOK_NAME] BEGIN rc=- "* ]]; then lines=(); continue; fi
+        [[ -n "$line" && "$line" != *" [$HOOK_NAME] END rc="* ]] || continue
+        # 已由 toast_err 写入提示文件的原文不再重复。
+        if [[ -f "$toast" ]] && grep -qxF -- "$line" "$toast" 2>/dev/null; then continue; fi
+        lines+=("${line:0:300}")
+        (( ${#lines[@]} <= 8 )) || lines=("${lines[@]:1}")
+    done < <(tail -n 200 -- "$HOOK_LOG_FILE" 2>/dev/null)
+    (( ${#lines[@]} )) || return 0
+    printf '日志摘录：\n'
+    printf '  %s\n' "${lines[@]}"
+}
+
+hook_exit() {
+    local rc="$1" notice excerpt=""
+    trap - EXIT ERR
+    if [[ "$HOOK_LOG_READY" == 1 ]]; then
+        if ! hook_record END "$rc"; then
+            HOOK_LOG_READY=0
+            printf 'ERROR: cannot write END (rc=%s) to %s\n' "$rc" "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+        fi
+    else
+        hook_record BEGIN - >&"$HOOK_ORIGINAL_STDERR" || :
+        hook_record END "$rc" >&"$HOOK_ORIGINAL_STDERR" || :
+    fi
+    if (( rc != 0 )); then
+        notice="${HOOK_NAME} 阶段 ${HOOK_STAGE} 失败（退出码 ${rc}，行 ${HOOK_FAILED_LINE:-unknown}）；日志：${HOOK_LOG_FILE}"
+        if [[ "$HOOK_LOG_READY" != 1 ]]; then
+            notice="${notice}（日志不可写，未能完整保存）"
+            printf '%s\n' "$notice" >&"$HOOK_ORIGINAL_STDERR"
+        else
+            excerpt="$(hook_log_excerpt)"
+            printf '%s\n' "$notice" >&2
+        fi
+        hook_append_toast "$notice${excerpt:+$'\n'$excerpt}"
+    fi
+    exit "$rc"
+}
+trap 'hook_exit "$?"' EXIT
+
+# 仅首次创建时使用私有 umask 和 noclobber 独占打开。
+if [[ -L "$HOOK_LOG_FILE" || ( -e "$HOOK_LOG_FILE" && ! -f "$HOOK_LOG_FILE" ) ]]; then
+    printf 'ERROR: refusing symlink or non-regular hook log: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+    exit 1
+fi
+if [[ ! -e "$HOOK_LOG_FILE" ]]; then
+    (umask 077; set -o noclobber; : > "$HOOK_LOG_FILE") || {
+        printf 'ERROR: cannot create hook log: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+        exit 1
+    }
+fi
+if [[ -L "$HOOK_LOG_FILE" || ! -f "$HOOK_LOG_FILE" || ! -w "$HOOK_LOG_FILE" ]]; then
+    printf 'ERROR: hook log is not a writable regular file: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+    exit 1
+fi
+if ! { exec >> "$HOOK_LOG_FILE" 2>&1; }; then
+    printf 'ERROR: cannot append hook log: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+    exit 1
+fi
+# 写入前再校验已打开的文件本身，而不只是打开前的路径名。
+if [[ -L "$HOOK_LOG_FILE" || ! -f /proc/self/fd/1 || ! "$HOOK_LOG_FILE" -ef /proc/self/fd/1 ]]; then
+    printf 'ERROR: hook log changed while opening: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+    exit 1
+fi
+if ! { printf '\n%s\n' '------------------------------------------------------------------------' && hook_record BEGIN -; }; then
+    printf 'ERROR: cannot write BEGIN to hook log: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+    exit 1
+fi
+HOOK_LOG_READY=1
+HOOK_STAGE=path-validation
+# END shared hook logging：公共日志块结束。
+
 
 ### 安装后回调 — 创建 venv、安装 hermes-agent、部署 prompts
 
 set -e
 
+# FPK 的 app/ 直接部署在 APPDEST，而不是 APPDEST/app。
+for name in TRIM_APPDEST TRIM_PKGHOME TRIM_PKGVAR; do
+    value="${!name}"
+    case "$value" in
+        /*) ;;
+        *) printf '%s must be an absolute path\n' "$name" >&2; exit 1 ;;
+    esac
+    while [[ "$value" == */ && "$value" != / ]]; do value="${value%/}"; done
+    case "$value/" in
+        /|//|*/../*|*/./*) printf 'Invalid path: %s\n' "$name" >&2; exit 1 ;;
+    esac
+    printf -v "$name" '%s' "$value"
+done
+mkdir -p -- "$TRIM_PKGVAR"
 LOG_FILE="${TRIM_PKGVAR}/info.log"
+: >> "$LOG_FILE"
 
 log_msg() {
     local msg="$(date '+%Y-%m-%d %H:%M:%S') - [install] $1"
-    echo "$msg"
-    echo "$msg" >> "${LOG_FILE}" 2>/dev/null || true
+    printf '%s\n' "$msg"
+    printf '%s\n' "$msg" >> "${LOG_FILE}" ||
+        printf 'WARNING: cannot append summary log: %s\n' "$LOG_FILE" >&2
 }
 
 toast_err() {
-    echo "$*" > "$TRIM_TEMP_LOGFILE"
+    printf '%s\n' "$*" >&2
+    hook_append_toast "$*"
 }
 
-# 全局错误捕获 — 任何行失败都显示具体命令和错误
-trap 'toast_err "脚本出错(L${LINENO}): $(tail -3 "${LOG_FILE}" 2>/dev/null)"' ERR
+# 记录失败行，EXIT trap 保留退出码并追加阶段/日志指引
+trap 'HOOK_FAILED_LINE=$LINENO' ERR
 
 # ---------------------------------------------------------------------------
 # 路径
@@ -31,382 +151,205 @@ UV_BIN="${DATA_DIR}/bin"
 APP_DIR="${TRIM_APPDEST}"
 PROMPTS_SRC="${APP_DIR}/config/prompts"
 
-export HOME="${DATA_DIR}"
+if [[ -L "$DATA_DIR" || ( -e "$DATA_DIR" && ! -d "$DATA_DIR" ) ]]; then
+    toast_err "Existing data path is not a plain directory; preserved without changes: $DATA_DIR"
+    exit 1
+fi
+if [[ -d "$DATA_DIR" ]]; then
+    log_msg "Preserving existing user data: $DATA_DIR; only missing defaults will be added"
+fi
+export HOME="${DATA_DIR}" HERMES_HOME="${DATA_DIR}"
 
 # uv 缓存目录放到 DATA_DIR 下，确保和 venv 同一文件系统，hardlink 可用
 export UV_CACHE_DIR="${DATA_DIR}/.uv-cache"
 
-# PyPI 镜像探测（多国内镜像优先，官方兜底）—— UV_INDEX_URL 给 uv pip install 用
 # ---------------------------------------------------------------------------
-detect_pypi_mirror() {
-    log_msg "探测 PyPI 镜像源（多国内镜像优先，官方兜底）..."
-    local MIRROR_URL="" PROBE_PATH="/hermes-agent/"
-
-    # 按优先级定义候选镜像列表（name:url)
-    declare -a MIRRORS=(
-        "aliyun|https://mirrors.aliyun.com/pypi/simple/"
-        "tsinghua|https://pypi.tuna.tsinghua.edu.cn/simple/"
-        "tencent|https://mirrors.cloud.tencent.com/pypi/simple/"
-        "ustc|https://pypi.mirrors.ustc.edu.cn/simple/"
-        "official|https://pypi.org/simple/"
-    )
-
-    for entry in "${MIRRORS[@]}"; do
-        local name="${entry%%|*}"
-        local url="${entry##*|}"
-        # 探测 URL = base + hermes-agent/ （简单 index 目录存在性检查）
-        local probe_url="${url}${PROBE_PATH}"
-        
-        if curl -I --fail --max-time 8 -o /dev/null -sS "${probe_url}" 2>>"${LOG_FILE}"; then
-            MIRROR_URL="${url%/*}/"  # 去掉末尾的 hermes-agent/ 取 simple/ 根路径
-            SUCCESS=true
-            case "${name}" in
-                aliyun)      log_msg "使用镜像：阿里云" ;;
-                tsinghua)    log_msg "使用镜像：清华" ;;
-                tencent)     log_msg "使用镜像：腾讯" ;;
-                ustc)        log_msg "使用镜像：中科大" ;;
-                official)    log_msg "使用镜像：PyPI 官方" ;;
-            esac
-            break
-        fi
-    done
-
-    if [ -z "${MIRROR_URL}" ]; then
-        log_msg "错误：所有 PyPI 镜像均不可用，请检查网络连接"
-        return 1
-    fi
-
-    export PIP_INDEX_URL="${MIRROR_URL}"
-    export UV_INDEX_URL="${MIRROR_URL}"
-}
-
-# 初始化镜像策略
-if ! detect_pypi_mirror; then
-    exit 1
-fi
-
-# ---------------------------------------------------------------------------
-# curl 从阿里云 PyPI 镜像直接下载 uv wheel，unzip 提取二进制
+# 私有 uv 固定为 0.13.5，从国内 PyPI 镜像下载官方 wheel 并按固定 SHA256 校验，不使用 PATH 里的 uv
 # ---------------------------------------------------------------------------
 ensure_uv() {
-    if [ -x "${UV_BIN}/uv" ]; then
-        UV="${UV_BIN}/uv"
-        log_msg "uv found (persistent): ${UV}"
-    else
-        log_msg "uv not found, installing via curl ..."
-        mkdir -p "${UV_BIN}"
-        local TMP_DIR
-        TMP_DIR="$(mktemp -d)"
-
-        local ARCH
-        case "$(uname -m)" in
-            x86_64)  ARCH="x86_64" ;;
-            aarch64) ARCH="aarch64" ;;
-            *)       ARCH="$(uname -m)" ;;
-        esac
-
-        log_msg ">>> 正在从 PyPI 镜像下载 uv (${ARCH}) ..."
-
-        local WHEEL_URL
-        WHEEL_URL=$(curl -LsSf "https://mirrors.aliyun.com/pypi/simple/uv/" 2>>"${LOG_FILE}" \
-            | grep -o 'href="[^"]*py3-none-manylinux[^"]*' \
-            | grep "${ARCH}" \
-            | sed 's|^href="../../|https://mirrors.aliyun.com/pypi/|; s|#sha256=.*||' \
-            | sort -t'-' -k2,2V \
-            | tail -1)
-
-        local UV_WHL="${TMP_DIR}/uv.whl"
-        if [ -n "${WHEEL_URL}" ]; then
-            log_msg "wheel URL: ${WHEEL_URL}"
-            if curl -L --retry 3 --retry-delay 3 --progress-bar -o "${UV_WHL}" "${WHEEL_URL}" 2>&1 \
-               && unzip -o -j "${UV_WHL}" "uv-*.data/scripts/uv" -d "${UV_BIN}" >>"${LOG_FILE}" 2>&1; then
-                log_msg "uv extracted from wheel"
-            fi
-        else
-            log_msg "simple index query failed, trying GitHub fallback ..."
-        fi
-
-        # wheel 下载失败 → GitHub tar.gz 兜底
-        if [ ! -x "${UV_BIN}/uv" ]; then
-            log_msg ">>> wheel 方式失败，尝试 GitHub 下载 ..."
-            local UV_TAR="uv-${ARCH}-unknown-linux-gnu"
-            local UV_GZ="${TMP_DIR}/uv.tar.gz"
-            if curl -L --retry 3 --retry-delay 5 --progress-bar \
-                 -o "${UV_GZ}" "https://github.com/astral-sh/uv/releases/latest/download/${UV_TAR}.tar.gz" 2>&1 \
-               && tar tzf "${UV_GZ}" >/dev/null 2>&1 \
-               && tar xzf "${UV_GZ}" -C "${UV_BIN}" --strip-components=1 "${UV_TAR}/uv" 2>&1; then
-                log_msg "uv extracted from GitHub tarball"
-            fi
-        fi
-
-        rm -rf "${TMP_DIR}"
-
-        if [ -x "${UV_BIN}/uv" ]; then
-            UV="${UV_BIN}/uv"
-            log_msg "uv installed: ${UV}"
-        else
-            toast_err "uv 安装失败: $(tail -3 "${LOG_FILE}" 2>/dev/null)"
-            exit 1
-        fi
+    local DATA_REAL BIN_REAL
+    DATA_REAL=$(readlink -m -- "$DATA_DIR") || return 1
+    BIN_REAL=$(readlink -m -- "$UV_BIN") || return 1
+    if [[ "$UV_BIN" != "$DATA_DIR/bin" || "$BIN_REAL" != "$DATA_REAL/bin" ]]; then
+        toast_err 'uv: private binary directory escapes DATA_DIR; no tool was executed or replaced'
+        return 1
     fi
-
-    log_msg "uv version: $("${UV}" --version 2>&1 || echo 'FAILED')"
-}
-
-# ---------------------------------------------------------------------------
-# 准备 Node.js 运行时到 data/node（对话增强功能，失败不影响主安装）
-#
-# 设计：data/node 为唯一「权威运行时」——完整发行版（含 npm/lib），随后由权限修复段
-# chown 给 app 用户，获得最大权限、可自管升级。hermes 一律优先调用 data 下资源。
-# 获取来源按优先级：
-#   A. 复用飞牛应用中心已装的 Node.js（隔离于 /var/apps/nodejs_v*/target 或
-#      /vol1/@appcenter/nodejs_v*，含完整 node+npm，无需联网）→ 复制完整发行版
-#   B. 在线下载完整发行版（来源 A 不可用时兜底）
-# ---------------------------------------------------------------------------
-# 打印 node/npm 版本摘要（npm 版本用 node 直接执行 npm-cli.js 获取，
-# 避开 shell PATH / shebang 依赖，确保日志里的 npm 版本真实可信）
-_log_node_summary() {
-    local src_label="$1" root="$2"
-    local nbin="${root}/bin/node"
-    local npm_cli="${root}/lib/node_modules/npm/bin/npm-cli.js"
-    local nver npmver
-    nver="$("${nbin}" --version 2>/dev/null || echo 'unknown')"
-    if [ -f "${npm_cli}" ]; then
-        npmver="$("${nbin}" "${npm_cli}" --version 2>/dev/null || echo 'unknown')"
-    else
-        npmver="missing"
-    fi
-    log_msg "────────────────────────────────────────────"
-    log_msg "[node] 就绪 ✓  来源：${src_label}"
-    log_msg "[node]   路径: ${nbin}"
-    log_msg "[node]   版本: node ${nver} | npm ${npmver}"
-    log_msg "────────────────────────────────────────────"
-}
-
-ensure_node() {
-    local NODE_ROOT="${DATA_DIR}/node"
-    local NODE_BIN="${NODE_ROOT}/bin/node"
-    local NODE_SRC=""
-
-    # 幂等：已存在可执行 node 则跳过（旧版仅二进制的安装同样可跑，无需强制重建）
-    if [ -x "${NODE_BIN}" ]; then
-        log_msg "[node] 已存在，跳过获取（幂等）；如需重测来源请先删除 ${NODE_ROOT}"
-        _log_node_summary "复用已有 data/node" "${NODE_ROOT}"
-        return 0
-    fi
-
-    # 架构映射
-    local ARCH
-    case "$(uname -m)" in
-        x86_64)        ARCH="x64" ;;
-        aarch64|arm64) ARCH="arm64" ;;
-        *)
-            log_msg "WARNING: unsupported arch $(uname -m) for node, skipping"
+    local UV_PATH="${UV_BIN}/uv" UV_VERSION=""
+    local VERSION_RE='^uv 0\.13\.5( \([^()[:cntrl:]]+\))?$'
+    # 旧 uv 即使可运行也可能无法读取当前 lock，只复用精确版本。
+    if [[ -f "$UV_PATH" && ! -L "$UV_PATH" && -x "$UV_PATH" ]]; then
+        if UV_VERSION=$("$UV_PATH" --version) && [[ "$UV_VERSION" =~ $VERSION_RE ]]; then
+            UV="$UV_PATH"
+            log_msg "uv found (persistent): ${UV}; version: ${UV_VERSION}"
             return 0
-            ;;
+        fi
+        log_msg "uv requires 0.13.5; replacing incompatible private uv: ${UV_VERSION:-version check failed}"
+    fi
+
+    local ARCH UV_SHA256 UV_WHL UV_WHL_SHA256 UV_WHL_PATH
+    ARCH="$(uname -m)" || return 1
+    case "$ARCH" in
+        x86_64)
+            UV_SHA256="f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f"
+            UV_WHL="uv-0.13.5-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+            UV_WHL_SHA256="fa8d26e08e34c29c0c4e820cf3181757086d547240b4f4d31ff1d8bd810ca946"
+            UV_WHL_PATH="3a/ad/3c2a81d66d1839063662e5b6c0002ec31f8ee987dbc5295747627ca6160a" ;;
+        aarch64)
+            UV_SHA256="4bb69cf95ed13f23713bb7bc09f241896ea0c75b7c557e615a20604b82f9c403"
+            UV_WHL="uv-0.13.5-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64.whl"
+            UV_WHL_SHA256="2386c2dc9b59fc1d39b1c500e4319d71d3268232eb3b38e29cd6775d6269e8d4"
+            UV_WHL_PATH="e8/2e/5bf9acf9d11fb790420e258a875e13bba36bc890858350642aca185efe0e" ;;
+        *) toast_err "uv 0.13.5: unsupported architecture: ${ARCH}"; return 1 ;;
     esac
+    local UV_TAR="uv-${ARCH}-unknown-linux-gnu"
+    local UV_URL="https://github.com/astral-sh/uv/releases/download/0.13.5/${UV_TAR}.tar.gz"
+    local UV_MIRROR="https://hermes-assets.nousresearch.com/upstream/sha256/${UV_SHA256}"
+    local TMP_DIR UV_GZ UV_WHL_FILE CANDIDATE URL ACQUIRED=0 BACKUP_DIR="" PUBLISHED=0 UNZIP_TOOL=""
+    if ! mkdir -p -- "$UV_BIN" || ! TMP_DIR="$(mktemp -d "${DATA_DIR}/.uv-bootstrap.XXXXXX")"; then
+        toast_err 'uv: cannot create private staging directory'
+        return 1
+    fi
+    UV_GZ="${TMP_DIR}/uv.tar.gz"
+    UV_WHL_FILE="${TMP_DIR}/${UV_WHL}"
+    CANDIDATE="${TMP_DIR}/${UV_TAR}/uv"
 
-    # ── 来源 A：复用飞牛应用中心已装的 Node.js（完整发行版，无需联网） ──
-    # 应用中心隔离安装，路径含版本号且不在系统 PATH。glob 匹配后按版本号取最高者，
-    # 复制完整发行版到 data/node（cp -a 保留权限/符号链接）。
-    log_msg "[node] 步骤1/2 — 探测飞牛 Node.js 应用（来源A，优先，无需联网）..."
-    local SRC_NODE_DIR=""
-    local cand
-    for cand in $(ls -d /var/apps/nodejs_v*/target /vol1/@appcenter/nodejs_v*/ 2>/dev/null | sort -V); do
-        cand="${cand%/}"
-        [ -x "${cand}/bin/node" ] && SRC_NODE_DIR="${cand}"   # 覆盖 → 最终保留最高版本
+    uv_fetch() {
+        curl --disable --fail --location --silent --show-error \
+            --proto '=https' --proto-redir '=https' --max-redirs 5 \
+            --connect-timeout 10 --max-time 180 --retry 2 --retry-delay 2 \
+            --retry-max-time 240 --max-filesize 52428800 --output "$1" "$2"
+    }
+
+    # 在线安装版：优先从国内 PyPI 镜像取官方 uv wheel（同一二进制，文件路径与 pypi.org 一致），
+    # 用固定 SHA256 校验后只解出 uv-0.13.5.data/scripts/uv。解压用 unzip 或系统 python3，
+    # 两者都没有时回退到 GitHub 的 tar.gz。
+    if command -v unzip >/dev/null 2>&1; then
+        UNZIP_TOOL=unzip
+    elif command -v python3 >/dev/null 2>&1 && python3 -c 'import zipfile' >/dev/null 2>&1; then
+        UNZIP_TOOL=python3
+    fi
+    if [[ -n "$UNZIP_TOOL" ]]; then
+        for URL in "https://mirrors.aliyun.com/pypi/packages/${UV_WHL_PATH}/${UV_WHL}" \
+                   "https://pypi.tuna.tsinghua.edu.cn/packages/${UV_WHL_PATH}/${UV_WHL}"; do
+            log_msg "uv 0.13.5 (${ARCH}): downloading wheel ${URL}"
+            if ! uv_fetch "$UV_WHL_FILE" "$URL"; then
+                log_msg "uv wheel download failed: ${URL}"
+                continue
+            fi
+            if ! printf '%s  %s\n' "$UV_WHL_SHA256" "$UV_WHL_FILE" | sha256sum --check; then
+                log_msg "uv wheel SHA256 verification failed: ${URL}"
+                rm -f -- "$UV_WHL_FILE"
+                continue
+            fi
+            log_msg "uv wheel SHA256 verified: ${UV_WHL_SHA256}"
+            mkdir -p -- "${TMP_DIR}/${UV_TAR}"
+            EXTRACTED=0
+            if [[ "$UNZIP_TOOL" == unzip ]]; then
+                unzip -p -- "$UV_WHL_FILE" 'uv-0.13.5.data/scripts/uv' > "$CANDIDATE" && EXTRACTED=1
+            else
+                python3 - "$UV_WHL_FILE" "$CANDIDATE" <<'PY' && EXTRACTED=1
+import shutil, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as whl, whl.open('uv-0.13.5.data/scripts/uv') as src, open(sys.argv[2], 'wb') as dst:
+    shutil.copyfileobj(src, dst)
+PY
+            fi
+            if [[ "$EXTRACTED" == 1 && -s "$CANDIDATE" ]] && chmod 755 -- "$CANDIDATE"; then
+                ACQUIRED=1
+                break
+            fi
+            log_msg "uv wheel extraction failed (${UNZIP_TOOL}): ${URL}"
+            rm -f -- "$CANDIDATE" "$UV_WHL_FILE"
+        done
+    else
+        log_msg 'uv: neither unzip nor python3 available; using GitHub tar.gz'
+    fi
+    if [[ "$ACQUIRED" != 1 ]]; then
+    for URL in "$UV_URL" "$UV_MIRROR"; do
+        log_msg "uv 0.13.5 (${ARCH}): downloading ${URL}"
+        if ! uv_fetch "$UV_GZ" "$URL"; then
+            log_msg "uv download failed: ${URL}"
+            continue
+        fi
+        # 校验通过前不读取 tar，仅解压官方归档中的预期二进制路径。
+        if ! printf '%s  %s\n' "$UV_SHA256" "$UV_GZ" | sha256sum --check; then
+            log_msg "uv SHA256 verification failed: ${URL}"
+            continue
+        fi
+        log_msg "uv SHA256 verified: ${UV_SHA256}"
+        if ! tar -xzf "$UV_GZ" -C "$TMP_DIR" -- "${UV_TAR}/uv"; then
+            log_msg "uv archive extraction failed: ${URL}"
+            continue
+        fi
+        ACQUIRED=1
+        break
     done
-
-    if [ -n "${SRC_NODE_DIR}" ]; then
-        local SRC_VER
-        SRC_VER="$("${SRC_NODE_DIR}/bin/node" --version 2>/dev/null || echo 'unknown')"
-        log_msg "[node] 来源A命中：${SRC_NODE_DIR} (node ${SRC_VER})，取系统最高版本"
-        log_msg "[node]   复制完整发行版 → ${NODE_ROOT}（含 npm/lib，cp -a 保权限）..."
-        (
-            set +e
-            mkdir -p "${NODE_ROOT}"
-            if cp -a "${SRC_NODE_DIR}/." "${NODE_ROOT}/" 2>>"${LOG_FILE}" && [ -x "${NODE_BIN}" ]; then
-                log_msg "[node]   复制完成"
-            else
-                log_msg "[node]   WARNING: 来源A 复制失败，回退到在线下载（来源B）"
-                rm -rf "${NODE_ROOT}" 2>/dev/null
-            fi
-        ) || true
-        [ -x "${NODE_BIN}" ] && NODE_SRC="来源A·复用飞牛 nodejs 应用 (${SRC_NODE_DIR})"
-    else
-        log_msg "[node] 来源A未命中：未发现 /var/apps/nodejs_v*/target 或 /vol1/@appcenter/nodejs_v*"
     fi
-
-    # ── 来源 B：在线下载完整发行版（来源 A 不可用时兜底，非致命） ──
-    if [ ! -x "${NODE_BIN}" ]; then
-        # v22.16.0 — 2025-05 LTS，经生产验证；.tar.gz 确保无 xz 工具也能解包
-        local NODE_VER="v22.16.0"
-        local TARBALL="node-${NODE_VER}-linux-${ARCH}.tar.gz"
-        local MIRROR_URL="https://npmmirror.com/mirrors/node/${NODE_VER}/${TARBALL}"
-        local OFFICIAL_URL="https://nodejs.org/dist/${NODE_VER}/${TARBALL}"
-
-        log_msg "[node] 步骤2/2 — 来源A不可用，回退在线下载 Node.js ${NODE_VER} (${ARCH})..."
-        (
-            set +e
-            TMP_DIR="$(mktemp -d)"
-            DL_PATH="${TMP_DIR}/${TARBALL}"
-            DL_OK=false
-
-            log_msg "mirror: ${MIRROR_URL}"
-            if curl -L --retry 3 --retry-delay 3 --connect-timeout 15 --progress-bar \
-                 -o "${DL_PATH}" "${MIRROR_URL}" 2>&1 && [ -s "${DL_PATH}" ]; then
-                DL_OK=true
-            else
-                log_msg "mirror failed, trying official: ${OFFICIAL_URL}"
-                if curl -L --retry 3 --retry-delay 5 --connect-timeout 15 --progress-bar \
-                     -o "${DL_PATH}" "${OFFICIAL_URL}" 2>&1 && [ -s "${DL_PATH}" ]; then
-                    DL_OK=true
-                fi
-            fi
-
-            if [ "${DL_OK}" != "true" ]; then
-                log_msg "WARNING: node download failed, skipping"
-                rm -rf "${TMP_DIR}"
-                exit 1
-            fi
-
-            if ! tar xzf "${DL_PATH}" -C "${TMP_DIR}" 2>>"${LOG_FILE}"; then
-                log_msg "WARNING: node tarball extraction failed, skipping"
-                rm -rf "${TMP_DIR}"
-                exit 1
-            fi
-
-            EXTRACTED_DIR="${TMP_DIR}/node-${NODE_VER}-linux-${ARCH}"
-            if [ ! -x "${EXTRACTED_DIR}/bin/node" ]; then
-                log_msg "WARNING: node binary not found in extracted dir, skipping"
-                rm -rf "${TMP_DIR}"
-                exit 1
-            fi
-
-            # 复制完整发行版（含 npm/lib），而非仅二进制
-            mkdir -p "${NODE_ROOT}"
-            cp -a "${EXTRACTED_DIR}/." "${NODE_ROOT}/"
-            rm -rf "${TMP_DIR}"
-            log_msg "[node]   下载安装完成"
-        ) || true
-        [ -x "${NODE_BIN}" ] && NODE_SRC="来源B·在线下载 ${NODE_VER}"
+    if [[ "$ACQUIRED" != 1 ]]; then
+        rm -rf -- "$TMP_DIR"
+        toast_err 'uv 0.13.5 acquisition failed; existing private uv retained'
+        return 1
     fi
-
-    # 验证最终结果（npm 版本用 node 直接执行 npm-cli.js 获取，PATH 无关，真实可信）
-    if [ -x "${NODE_BIN}" ]; then
-        _log_node_summary "${NODE_SRC:-未知来源}" "${NODE_ROOT}"
-    else
-        log_msg "[node] WARNING: node 未就绪，对话功能可能不可用（不影响主功能）"
+    UV_VERSION=""
+    if [[ ! -f "$CANDIDATE" || -L "$CANDIDATE" || ! -x "$CANDIDATE" ]] ||
+        ! UV_VERSION=$("$CANDIDATE" --version) || [[ ! "$UV_VERSION" =~ $VERSION_RE ]]; then
+        toast_err "uv candidate executable/version check failed: ${UV_VERSION:-unavailable}; expected uv 0.13.5"
+        rm -rf -- "$TMP_DIR"
+        return 1
     fi
-}
+    log_msg "uv candidate verified: ${UV_VERSION}"
 
-# ---------------------------------------------------------------------------
-# 从 wheel 中提取 hermes_cli/tui_dist/entry.js（对话 TUI 增强，非致命）
-# ---------------------------------------------------------------------------
-ensure_tui_bundle() {
-    # 动态定位 hermes_cli 目录（不硬编码 python 版本）
-    local HERMES_CLI_DIR
-    HERMES_CLI_DIR=$("${VENV_DIR}/bin/python3" -c "import hermes_cli,os;print(os.path.dirname(hermes_cli.__file__))" 2>/dev/null)
-    if [ -z "${HERMES_CLI_DIR}" ] || [ ! -d "${HERMES_CLI_DIR}" ]; then
-        log_msg "WARNING: cannot locate hermes_cli package dir, skipping tui_dist provisioning"
-        return 0
-    fi
-
-    local SP
-    SP=$(dirname "${HERMES_CLI_DIR}")
-    local ENTRY="${HERMES_CLI_DIR}/tui_dist/entry.js"
-
-    # 幂等：已存在则跳过
-    if [ -f "${ENTRY}" ]; then
-        log_msg "tui_dist present: ${ENTRY}"
-        return 0
-    fi
-
-    log_msg ">>> tui_dist/entry.js missing, provisioning from wheel ..."
-
-    # ── 非致命：子 shell 内执行，失败仅 WARNING ──
-    (
-        set +e
-        TMP_DIR="$(mktemp -d)"
-        WHL="${TMP_DIR}/hermes_agent.whl"
-        DL_OK=false
-
-        # --- 阿里云镜像 simple index ---
-        log_msg "querying aliyun simple index for hermes-agent wheel ..."
-        WHEEL_URL=$(curl -LsSf "https://mirrors.aliyun.com/pypi/simple/hermes-agent/" 2>>"${LOG_FILE}" \
-            | grep -o 'href="[^"]*hermes_agent-'"${HERMES_VERSION}"'-py3-none-any[^"]*' \
-            | head -1 \
-            | sed 's|^href="../../|https://mirrors.aliyun.com/pypi/|; s|#sha256=.*||')
-
-        if [ -n "${WHEEL_URL}" ]; then
-            log_msg "wheel URL (aliyun): ${WHEEL_URL}"
-            if curl -L --retry 3 --retry-delay 3 --connect-timeout 15 --progress-bar \
-                 -o "${WHL}" "${WHEEL_URL}" 2>&1 && [ -s "${WHL}" ]; then
-                DL_OK=true
-            else
-                log_msg "WARNING: aliyun wheel download failed"
-            fi
-        else
-            log_msg "WARNING: aliyun simple index query returned no py3-none-any wheel"
+    # 备份保留在 DATA_DIR。不先移走旧文件，发布用同文件系统的原子 rename。
+    if [[ -e "$UV_PATH" || -L "$UV_PATH" ]]; then
+        if [[ ! -f "$UV_PATH" && ! -L "$UV_PATH" ]]; then
+            toast_err "uv: refusing to replace non-file: ${UV_PATH}"
+            rm -rf -- "$TMP_DIR"
+            return 1
         fi
-
-        # --- 兜底：官方 PyPI ---
-        if [ "${DL_OK}" != "true" ]; then
-            log_msg "trying official PyPI simple index ..."
-            WHEEL_URL=$(curl -LsSf "https://pypi.org/simple/hermes-agent/" 2>>"${LOG_FILE}" \
-                | grep -o 'href="[^"]*hermes_agent-'"${HERMES_VERSION}"'-py3-none-any[^"]*' \
-                | head -1 \
-                | sed 's|#sha256=.*||')
-
-            if [ -n "${WHEEL_URL}" ]; then
-                log_msg "wheel URL (pypi): ${WHEEL_URL}"
-                if curl -L --retry 3 --retry-delay 5 --connect-timeout 15 --progress-bar \
-                     -o "${WHL}" "${WHEEL_URL}" 2>&1 && [ -s "${WHL}" ]; then
-                    DL_OK=true
-                else
-                    log_msg "WARNING: official PyPI wheel download failed"
-                fi
-            else
-                log_msg "WARNING: official PyPI query returned no py3-none-any wheel"
-            fi
+        if ! BACKUP_DIR="$(mktemp -d "${UV_BIN}/.uv-backup.XXXXXX")" ||
+            ! cp -pP -- "$UV_PATH" "${BACKUP_DIR}/uv"; then
+            toast_err 'uv backup failed; existing private uv retained'
+            rm -rf -- "$TMP_DIR"
+            return 1
         fi
-
-        if [ "${DL_OK}" != "true" ]; then
-            log_msg "WARNING: cannot obtain hermes-agent wheel, tui_dist not provisioned"
-            rm -rf "${TMP_DIR}"
-            exit 1
-        fi
-
-        # 从 wheel 中解压 tui_dist 目录到 site-packages
-        log_msg "extracting hermes_cli/tui_dist/* from wheel ..."
-        if ! unzip -o "${WHL}" "hermes_cli/tui_dist/*" -d "${SP}" >>"${LOG_FILE}" 2>&1; then
-            log_msg "WARNING: unzip tui_dist from wheel failed"
-            rm -rf "${TMP_DIR}"
-            exit 1
-        fi
-
-        rm -rf "${TMP_DIR}"
-    ) || true
-
-    # 验证最终结果
-    if [ -f "${ENTRY}" ]; then
-        log_msg "tui_dist/entry.js provisioned: ${ENTRY}"
-    else
-        log_msg "WARNING: tui_dist/entry.js 未能补齐，对话功能可能不可用（不影响主功能）"
+        log_msg "uv previous binary backup: ${BACKUP_DIR}/uv"
     fi
+    if mv -fT -- "$CANDIDATE" "$UV_PATH"; then
+        PUBLISHED=1
+    fi
+    UV_VERSION=""
+    if [[ "$PUBLISHED" != 1 || ! -f "$UV_PATH" || -L "$UV_PATH" || ! -x "$UV_PATH" ]] ||
+        ! UV_VERSION=$("$UV_PATH" --version) || [[ ! "$UV_VERSION" =~ $VERSION_RE ]]; then
+        toast_err "uv publish failed: ${UV_VERSION:-executable unavailable}"
+        if [[ -n "$BACKUP_DIR" ]]; then
+            if cp -pP -- "${BACKUP_DIR}/uv" "${TMP_DIR}/uv.rollback" &&
+                mv -fT -- "${TMP_DIR}/uv.rollback" "$UV_PATH"; then
+                log_msg "uv rollback restored previous binary; backup: ${BACKUP_DIR}/uv"
+            else
+                toast_err "uv rollback failed; previous binary preserved at ${BACKUP_DIR}/uv"
+            fi
+        elif [[ "$PUBLISHED" == 1 ]]; then
+            rm -f -- "$UV_PATH" || toast_err "uv: cannot remove failed publication: ${UV_PATH}"
+        fi
+        rm -rf -- "$TMP_DIR"
+        return 1
+    fi
+    rm -rf -- "$TMP_DIR"
+    UV="$UV_PATH"
+    log_msg "uv installed (private): ${UV}; version: ${UV_VERSION}"
 }
 
 # ---------------------------------------------------------------------------
 # 1. 创建数据目录
 # ---------------------------------------------------------------------------
+HOOK_STAGE=create-data-directories
 log_msg "Creating data directories under ${DATA_DIR} ..."
 mkdir -p "${DATA_DIR}"/{sessions,skills,workspace,logs,memories,hooks,bin,cron/output}
 mkdir -p "${VAR_DIR}"
-mkdir -p "${VENV_DIR}"
 
 # ---------------------------------------------------------------------------
 # 2. 读取目标版本号（从 hermes-version.env，manifest 不部署到设备）
 # ---------------------------------------------------------------------------
+HOOK_STAGE=version-config
 if [ ! -f "${APP_DIR}/config/bootstrap/hermes-version.env" ]; then
     toast_err "hermes-version.env 不存在，请检查打包是否包含 config/bootstrap/"
     exit 1
@@ -420,57 +363,22 @@ fi
 log_msg "hermes-agent target version: ${HERMES_VERSION}"
 
 # ---------------------------------------------------------------------------
-# 3. 检测并安装 hermes-agent（PyPI 固定版本）
-#    v0.19.0 是最后一个支持 uv pip install 的版本，以后都停在这里。
-#    用户后续可通过"更新"按钮升级到 GitHub tag 版（editable 模式）
+# 3. 从包内固定源码安装，安装和升级共用锁定同步/健康检查
 # ---------------------------------------------------------------------------
+HOOK_STAGE=runtime-helper
+. "${APP_DIR}/config/bootstrap/install-runtime.sh"
+HOOK_STAGE=ensure-uv
 ensure_uv
-
-# 创建 Python 虚拟环境（如果不存在）
-log_msg ">>> 检查 Python 虚拟环境 ..."
-if [ ! -x "${VENV_DIR}/bin/python3" ]; then
-    log_msg ">>> 虚拟环境不存在，正在创建 ..."
-    "${UV}" venv "${VENV_DIR}" >>"${LOG_FILE}" 2>&1
-    if [ ! -x "${VENV_DIR}/bin/python3" ]; then
-        toast_err "无法创建虚拟环境：$(tail -5 "${LOG_FILE}" 2>/dev/null)"
-        exit 1
-    fi
-    log_msg "虚拟环境创建成功：${VENV_DIR}"
-else
-    log_msg "虚拟环境已存在：${VENV_DIR}"
-fi
-
-# 检查是否已有更新版本（避免重复打包降级到 0.19.0）
-log_msg ">>> 检测当前已安装的 hermes-agent 版本..."
-ACTUAL_VER=$($UV pip show --python "${VENV_DIR}/bin/python3" hermes-agent 2>/dev/null | grep -i '^version' | awk '{print $2}' || echo "unknown")
-log_msg "当前已安装 hermes-agent: ${ACTUAL_VER}"
-
-# 空字符串或 unknown 都视为未安装
-if [ -z "${ACTUAL_VER}" ]; then
-    ACTUAL_VER="unknown"
-fi
-
-if [ "${ACTUAL_VER}" != "unknown" ] && [ "${ACTUAL_VER}" != "${HERMES_VERSION}" ]; then
-    # 检测到非标准版本（可能是 git 版更新过），跳过覆盖保持用户升级
-    log_msg "⚠️ 检测到非标准版本 (${ACTUAL_VER})，跳过 PyPI 覆盖以保持用户升级"
-    # 跳过安装不强制重装，但二进制必须存在，否则后续服务无法启动
-    [ -f "${HERMES}" ] || { toast_err "hermes 二进制不存在（${HERMES}），用户版本校验失败"; exit 1; }
-elif [ "${ACTUAL_VER}" = "unknown" ]; then
-    # 全新安装或缺失，执行 PyPI 安装
-    log_msg ">>> 全新安装，从 PyPI 镜像安装 hermes-agent==${HERMES_VERSION}..."
-    "${UV}" pip install --no-cache --python "${VENV_DIR}/bin/python3" "hermes-agent[all]==${HERMES_VERSION}" \
-        2>>"${LOG_FILE}" || true
-    # 硬校验：pip 安装被 || true 吞掉错误，必须以二进制落地为准
-    [ -f "${HERMES}" ] || { toast_err "hermes 二进制安装失败"; exit 1; }
-fi
-
-# 补齐 provider SDK（anthropic / openai）- 确保 anthropic_messages 模式可用
-log_msg ">>> 补齐 provider SDK（anthropic / openai）..."
-"${UV}" pip install --no-cache --python "${VENV_DIR}/bin/python3" "anthropic>=0.39.0" "openai" 2>>"${LOG_FILE}" || true
+HOOK_STAGE=ensure-node
+ensure_node
+HOOK_STAGE=install-runtime
+install_runtime
 
 # 把 uv 软链接进 venv/bin，让 hermes 运行时（PATH 仅含 venv/bin）能找到 uv
-if [ -x "${UV_BIN}/uv" ] && [ -d "${VENV_DIR}/bin" ]; then
-    ln -sf "${UV_BIN}/uv" "${VENV_DIR}/bin/uv"
+if [ -x "${UV_BIN}/uv" ] && [ -d "${VENV_DIR}/bin" ] && [ ! -L "${VENV_DIR}/bin" ]; then
+    if [[ ! -e "$VENV_DIR/bin/uv" && ! -L "$VENV_DIR/bin/uv" ]]; then
+        ln -s "${UV_BIN}/uv" "${VENV_DIR}/bin/uv"
+    fi
     if [ -x "${VENV_DIR}/bin/uv" ]; then
         log_msg "uv symlinked into venv/bin"
     else
@@ -479,80 +387,65 @@ if [ -x "${UV_BIN}/uv" ] && [ -d "${VENV_DIR}/bin" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3.5 下载 Node.js 运行时（对话增强，非致命）
-# ---------------------------------------------------------------------------
-ensure_node
-
-# ---------------------------------------------------------------------------
-# 3.6 补齐 tui_dist/entry.js（对话 TUI 增强，非致命）
-# ---------------------------------------------------------------------------
-ensure_tui_bundle
-
-# ---------------------------------------------------------------------------
 # 4. 部署 prompts
 # ---------------------------------------------------------------------------
+HOOK_STAGE=deploy-prompts
 if [ -d "${PROMPTS_SRC}" ]; then
-    # skills/ — 始终覆盖（跟随版本）
+    # skills/ — 仅补缺失文件，保留用户修改
     if [ -d "${PROMPTS_SRC}/skills" ]; then
         mkdir -p "${DATA_DIR}/skills"
-        cp -a "${PROMPTS_SRC}/skills/." "${DATA_DIR}/skills/"
+        cp -a -n "${PROMPTS_SRC}/skills/." "${DATA_DIR}/skills/"
         log_msg "skills deployed"
     fi
 
     # SOUL.md — 不存在才复制
-    if [ -f "${PROMPTS_SRC}/SOUL.md" ] && [ ! -f "${DATA_DIR}/SOUL.md" ]; then
-        cp "${PROMPTS_SRC}/SOUL.md" "${DATA_DIR}/SOUL.md"
+    if [ -f "${PROMPTS_SRC}/SOUL.md" ] && [ ! -e "${DATA_DIR}/SOUL.md" ] && [ ! -L "${DATA_DIR}/SOUL.md" ]; then
+        cp -n -- "${PROMPTS_SRC}/SOUL.md" "${DATA_DIR}/SOUL.md"
         log_msg "SOUL.md deployed (first install)"
     fi
 
     # AGENTS.md — 不存在才复制
-    if [ -f "${PROMPTS_SRC}/AGENTS.md" ] && [ ! -f "${DATA_DIR}/AGENTS.md" ]; then
-        cp "${PROMPTS_SRC}/AGENTS.md" "${DATA_DIR}/AGENTS.md"
+    if [ -f "${PROMPTS_SRC}/AGENTS.md" ] && [ ! -e "${DATA_DIR}/AGENTS.md" ] && [ ! -L "${DATA_DIR}/AGENTS.md" ]; then
+        cp -n -- "${PROMPTS_SRC}/AGENTS.md" "${DATA_DIR}/AGENTS.md"
         log_msg "AGENTS.md deployed (first install)"
     fi
 
     # config.yaml — 不存在才复制（使用 prompts/ 中的模板）
-    if [ -f "${PROMPTS_SRC}/config.yaml" ] && [ ! -f "${DATA_DIR}/config.yaml" ]; then
-        cp "${PROMPTS_SRC}/config.yaml" "${DATA_DIR}/config.yaml"
+    if [ -f "${PROMPTS_SRC}/config.yaml" ] && [ ! -e "${DATA_DIR}/config.yaml" ] && [ ! -L "${DATA_DIR}/config.yaml" ]; then
+        cp -n -- "${PROMPTS_SRC}/config.yaml" "${DATA_DIR}/config.yaml"
         log_msg "config.yaml deployed (first install)"
     fi
 
-    # 清理源目录（install_callback 只运行一次）
-    rm -rf "${PROMPTS_SRC}"
-    log_msg "prompts source cleaned up"
 fi
 
 # ---------------------------------------------------------------------------
 # 5. 修复权限
 # ---------------------------------------------------------------------------
-mkdir -p "${VAR_DIR}" 2>/dev/null
+HOOK_STAGE=permissions
+mkdir -p "${VAR_DIR}"
 
 if [ -n "${TRIM_USERNAME}" ]; then
     log_msg "=== 修复权限 ==="
     log_msg "TRIM_USERNAME=${TRIM_USERNAME}"
-    log_msg "APP_DIR=${APP_DIR} owner=$(stat -c '%U:%G' "${APP_DIR}" 2>/dev/null || echo 'N/A') perms=$(stat -c '%a' "${APP_DIR}" 2>/dev/null || echo 'N/A')"
-    log_msg "DATA_DIR=${DATA_DIR} owner=$(stat -c '%U:%G' "${DATA_DIR}" 2>/dev/null || echo 'N/A') perms=$(stat -c '%a' "${DATA_DIR}" 2>/dev/null || echo 'N/A')"
+    log_msg "APP_DIR=${APP_DIR} owner=$(stat -c '%U:%G' "${APP_DIR}" || echo 'N/A') perms=$(stat -c '%a' "${APP_DIR}" || echo 'N/A')"
+    log_msg "DATA_DIR=${DATA_DIR} owner=$(stat -c '%U:%G' "${DATA_DIR}" || echo 'N/A') perms=$(stat -c '%a' "${DATA_DIR}" || echo 'N/A')"
 
-    if chown -R "${TRIM_USERNAME}:${TRIM_USERNAME}" "${APP_DIR}" 2>>"${LOG_FILE}"; then
+    if chown -R "${TRIM_USERNAME}:${TRIM_USERNAME}" "${APP_DIR}"; then
         log_msg "chown -R ${TRIM_USERNAME}:${TRIM_USERNAME} ${APP_DIR} → OK"
     else
         log_msg "chown -R ${TRIM_USERNAME}:${TRIM_USERNAME} ${APP_DIR} → FAILED (exit=$?)"
     fi
-    if chmod 775 "${APP_DIR}" 2>>"${LOG_FILE}"; then
+    if chmod 775 "${APP_DIR}"; then
         log_msg "chmod 775 ${APP_DIR} → OK"
     else
         log_msg "chmod 775 ${APP_DIR} → FAILED (exit=$?)"
     fi
 
-    if chown -R "${TRIM_USERNAME}:${TRIM_USERNAME}" "${DATA_DIR}" 2>>"${LOG_FILE}"; then
-        log_msg "chown -R ${TRIM_USERNAME}:${TRIM_USERNAME} ${DATA_DIR} → OK"
+    if repair_data_ownership; then
+        log_msg "DATA_DIR ownership repaired; original modes preserved"
     else
-        log_msg "chown -R ${TRIM_USERNAME}:${TRIM_USERNAME} ${DATA_DIR} → FAILED (exit=$?)"
-    fi
-    if chmod -R 750 "${DATA_DIR}" 2>>"${LOG_FILE}"; then
-        log_msg "chmod -R 750 ${DATA_DIR} → OK"
-    else
-        log_msg "chmod -R 750 ${DATA_DIR} → FAILED (exit=$?)"
+        toast_err "数据归属修复失败；未完成安装，请查看权限错误日志：${HOOK_LOG_FILE}"
+        exit 1
     fi
 
     # 残留文件检查

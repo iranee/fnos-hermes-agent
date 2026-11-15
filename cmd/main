@@ -1,224 +1,524 @@
 #!/bin/bash
-#
-# Hermes Agent — 生命周期管理
-# start:  启动 Node.js monitor（后台运行，写 PID 文件）
-# stop:   发送 SIGTERM，等待优雅关闭，超时 SIGKILL
-# status: 查询进程状态
-#
 
-# 从环境变量或系统默认值获取路径（支持任意 volume：vol1、vol2、volx 等）
-TRIM_APPDEST="${TRIM_APPDEST:-/vol1/@appcenter/hermes-agent}"
-TRIM_PKGHOME="${TRIM_PKGHOME:-/vol1/@apphome/hermes-agent}"
-TRIM_PKGVAR="${TRIM_PKGVAR:-/vol1/@appdata/hermes-agent}"
+for name in TRIM_APPDEST TRIM_PKGHOME TRIM_PKGVAR; do
+    value="${!name}"
+    case "$value" in
+        /*) ;;
+        *) printf '%s must be an absolute path\n' "$name" >&2; exit 1 ;;
+    esac
+    while [[ "$value" == */ && "$value" != / ]]; do value="${value%/}"; done
+    case "$value/" in
+        /|//|*/../*|*/./*) printf 'Invalid path: %s\n' "$name" >&2; exit 1 ;;
+    esac
+    printf -v "$name" '%s' "$value"
+done
 
-# 提取实际使用的 volume 前缀（自动探测 vol1/vol2/volx 等）
-detect_volume_prefix() {
-    local base_dir="$1"
-    # 从路径中提取 /volX/ 部分
-    echo "$base_dir" | sed -E 's#^(/vol[0-9]+|/vol[a-z]+).*/#\1#'
-}
+APP_DIR="$TRIM_APPDEST"
+DATA_DIR="$TRIM_PKGHOME/data"
+VAR_DIR="$TRIM_PKGVAR"
+BOOT_SCRIPT="$APP_DIR/server/boot.js"
+SOCKET_PATH="$APP_DIR/hermes-agent.sock"
+PID_FILE="$VAR_DIR/app.pid"
+LOG_FILE="$VAR_DIR/info.log"
+log_msg() { printf '%s - %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"; }
 
-# 动态计算 DATA_DIR，使用实际存在的 node 路径
-resolve_data_dir() {
-    # 优先级 1: 已设置的 TRIM_PKGHOME
-    if [ -n "${TRIM_PKGHOME}" ] && [ -d "${TRIM_PKGHOME}/data" ]; then
-        echo "${TRIM_PKGHOME}/data"
-        return
-    fi
-    
-    # 优先级 2: 从 TRIM_APPDEST 推导
-    if [ -n "${TRIM_APPDEST}" ] && [ -d "$(dirname "${TRIM_APPDEST}")/hermes-agent/data" ]; then
-        echo "$(dirname "${TRIM_APPDEST}")/hermes-agent/data"
-        return
-    fi
-    
-    # 优先级 3: 遍历可能的 volume 查找（一般最多 8 个卷）
-    for vol_num in 1 2 3 4 5 6 7 8; do
-        if [ -d "/vol${vol_num}/@appcenter/hermes-agent/server" ]; then
-            echo "/vol${vol_num}/@apphome/hermes-agent/data"
-            return
+# stop 也用于应用目录被删除后的残留恢复。不从应用可写目录加载诊断工具。
+if [[ "${1:-}" == stop ]]; then
+    export PATH=/usr/bin:/usr/sbin:/bin:/sbin
+else
+    for dir in "$APP_DIR" "$TRIM_PKGHOME" "$DATA_DIR"; do
+        if [[ ! -d "$dir" ]]; then
+            printf 'Required directory missing: %s\n' "$dir" >&2
+            exit 1
         fi
     done
-    
-    # 找不到返回空
-    echo ""
-}
-
-# 动态导出 PATH（找到 node 二进制所在目录）
-export_node_path() {
-    local data_dir="$1"
-    if [ -d "${data_dir}/node/bin" ]; then
-        export PATH="${data_dir}/node/bin:/usr/local/bin:$PATH"
-        log_msg "[环境] NODE_PATH=${data_dir}/node/bin"
-    else
-        log_msg "[警告] 未找到 ${data_dir}/node/bin，尝试全局 node"
+fi
+mkdir -p -- "$VAR_DIR" || exit 1
+: >> "$LOG_FILE" || exit 1
+export APP_DIR DATA_DIR VAR_DIR
+if [[ "${1:-}" != stop ]]; then
+    export PATH="$DATA_DIR/venv/bin:$DATA_DIR/node/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin"
+    case "$(uname -m)" in x86_64) PRIVATE_LIB_ARCH=x64 ;; aarch64|arm64) PRIVATE_LIB_ARCH=arm64 ;; *) PRIVATE_LIB_ARCH="" ;; esac
+    if [[ -n "$PRIVATE_LIB_ARCH" && -f "$APP_DIR/lib/$PRIVATE_LIB_ARCH/libatomic.so.1" && ! -L "$APP_DIR/lib/$PRIVATE_LIB_ARCH/libatomic.so.1" ]]; then
+        export LD_LIBRARY_PATH="$APP_DIR/lib/$PRIVATE_LIB_ARCH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     fi
-}
-
-LOG_FILE="${TRIM_PKGVAR}/info.log"
-PID_FILE="${TRIM_PKGVAR}/app.pid"
-DATA_DIR=$(resolve_data_dir)
-
-if [ -z "${DATA_DIR}" ]; then
-    log_msg "[错误] 无法定位数据目录，请检查应用安装路径"
-    exit 1
 fi
 
-log_msg "[环境] TRIM_APPDEST=${TRIM_APPDEST}"
-log_msg "[环境] TRIM_PKGHOME=${TRIM_PKGHOME}"
-log_msg "[环境] DATA_DIR=${DATA_DIR}"
-export PATH="${DATA_DIR}/node/bin:/usr/local/bin:$PATH"
-VAR_DIR="${TRIM_PKGVAR}"
-export VAR_DIR APP_DIR
-MONITOR_SCRIPT="${TRIM_APPDEST}/server/monitor.js"
-# 引导进程：由 boot.js 独占 unix socket 并动态加载 monitor.js
-# 加载失败仍经 socket 提供诊断页 /debug（卡片式，内外网一致可访问）
-BOOT_SCRIPT="${TRIM_APPDEST}/server/boot.js"
-SOCKET_PATH="${TRIM_APPDEST}/hermes-agent.sock"
-PID_FILE="${TRIM_PKGVAR}/app.pid"
-DIAG_PID_FILE="${TRIM_PKGVAR}/diag.pid"
-LOG_FILE="${TRIM_PKGVAR}/info.log"
-
-log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}; }
-
-# ─── 端口检测函数 ──────────────────────────────────────────────────────
-check_and_set_ports() {
-    local GW_PORT="${GATEWAY_PORT:-8642}"
-    local DB_PORT="${DASHBOARD_PORT:-9119}"
-    local ALTERNATE_GW="28642"
-    local ALTERNATE_DB="29119"
-
-    # 检查默认端口是否被占用（通过 /proc/net/tcp）
-    is_port_in_use() {
-        local port="$1"
-        local hex_port
-        hex_port=$(printf "%04X" "$port")
-        grep -q ":[[:space:]]*${hex_port}:" /proc/net/tcp /proc/net/tcp6 2>/dev/null
-    }
-
-    if [ -z "${GATEWAY_PORT}" ] && [ -z "${DASHBOARD_PORT}" ]; then
-        # 两个都未设置，检查默认组合
-        if is_port_in_use 8642 || is_port_in_use 9119; then
-            GATEWAY_PORT=$ALTERNATE_GW
-            DASHBOARD_PORT=$ALTERNATE_DB
-            log_msg "[端口检测] 默认端口 8642/9119 被占用，切换至 ${ALTERNATE_GW}/${ALTERNATE_DB}"
-        else
-            GATEWAY_PORT=8642
-            DASHBOARD_PORT=9119
-        fi
-    elif [ -z "${GATEWAY_PORT}" ]; then
-        # 只检查 Gateway 端口
-        if is_port_in_use 8642; then
-            GATEWAY_PORT=$ALTERNATE_GW
-            log_msg "[端口检测] Gateway 端口 8642 被占用，切换至 ${ALTERNATE_GW}"
-        else
-            GATEWAY_PORT=8642
-        fi
-    elif [ -z "${DASHBOARD_PORT}" ]; then
-        # 只检查 Dashboard 端口
-        if is_port_in_use 9119; then
-            DASHBOARD_PORT=$ALTERNATE_DB
-            log_msg "[端口检测] Dashboard 端口 9119 被占用，切换至 ${ALTERNATE_DB}"
-        else
-            DASHBOARD_PORT=9119
-        fi
-    fi
-
-    export GATEWAY_PORT DASHBOARD_PORT
-    log_msg "[端口检测] GATEWAY_PORT=${GATEWAY_PORT}, DASHBOARD_PORT=${DASHBOARD_PORT}"
+valid_pid() {
+    [[ "$1" =~ ^[1-9][0-9]*$ && ${#1} -le 10 && "$1" != 1 ]]
 }
 
-start_process() {
-    if status; then return 0; fi
-    if ! command -v node >/dev/null 2>&1; then log_msg "node not found"; return 1; fi
+read_pid() {
+    local value
+    [[ -f "$PID_FILE" && -r "$PID_FILE" ]] || return 1
+    value=$(< "$PID_FILE")
+    valid_pid "$value" || return 1
+    printf '%s' "$value"
+}
 
-    # 检测并设置端口（在 main 中完成端口冲突处理）
-    check_and_set_ports
+process_stat() {
+    local line
+    local -a fields
+    IFS= read -r line 2>/dev/null < "/proc/$1/stat" || return 1
+    [[ "$line" == "$1 ("* ]] || return 1
+    read -r -a fields <<< "${line##*) }"
+    [[ ${fields[1]} =~ ^[0-9]+$ && ${fields[19]} =~ ^[0-9]+$ ]] || return 1
+    PROC_STATE="${fields[0]}" PROC_PARENT="${fields[1]}" PROC_START="${fields[19]}"
+}
 
-    # 确保 socket 目录存在且可写
-    local SOCK_DIR="$(dirname "${SOCKET_PATH}")"
-    mkdir -p "${SOCK_DIR}" 2>/dev/null
-    chmod 755 "${SOCK_DIR}" 2>/dev/null
+process_start() {
+    process_stat "$1" && [[ "$PROC_STATE" != Z && "$PROC_STATE" != X ]]
+}
 
-    mkdir -p "${TRIM_PKGVAR}" 2>/dev/null
+same_dir() {
+    [[ "$1" == "$2" ]] || [[ "$1" == /* && -d "$1" && -d "$2" && "$1" -ef "$2" ]]
+}
 
-    log_msg "Starting Hermes Agent (boot.js + monitor)..."
-    log_msg "SOCKET_PATH=${SOCKET_PATH}"
-    rm -f "${SOCKET_PATH}"
-    
-    # 启动主引导进程 boot.js（独占 unix socket，动态加载 monitor.js）
-    # 诊断页已并入 boot.js，经 socket 对外提供（路径 /debug），内外网一致，无需独立端口进程
-    HOME="${DATA_DIR}" HERMES_HOME="${DATA_DIR}" APP_DIR="${TRIM_APPDEST}" DATA_DIR="${DATA_DIR}" VAR_DIR="${VAR_DIR}" MONITOR_SOCKET_PATH="${SOCKET_PATH}" BASE_PATH="/app/hermes-agent" PATH="${DATA_DIR}/venv/bin:${DATA_DIR}/node/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin" GATEWAY_PORT="${GATEWAY_PORT}" DASHBOARD_PORT="${DASHBOARD_PORT}" node "${BOOT_SCRIPT}" >> ${LOG_FILE} 2>&1 &
-    printf "%s" "$!" > ${PID_FILE}
+# cat 的退出码也在同一流中传递。末尾的结束标记必须单独成一项：拒绝读取错误、
+# 空 cmdline 和没有完整 NUL 终结的最后一项。完整的空 environ 则有效。
+# 不把 -c 文本当代码或归属依据。
+read_nul() {
+    local entry last
+    PROC_PARTS=()
+    while IFS= read -r -d '' entry; do PROC_PARTS+=("$entry"); done < <(
+        if cat -- "$1" 2>/dev/null; then printf '\001read-ok\0'; else printf '\001read-failed\0'; fi
+    )
+    last=$((${#PROC_PARTS[@]} - 1))
+    (( last >= 0 )) || return 1
+    entry="${PROC_PARTS[$last]}"
+    unset 'PROC_PARTS[last]'
+    [[ "$entry" == $'\001read-ok' && ( "$last" -gt 0 || "${2:-}" == allow-empty ) ]]
+}
 
-    # 等待 socket 创建（最多 5 秒）
-    local i
-    for i in $(seq 1 10); do
-        if [ -S "${SOCKET_PATH}" ]; then
-            chmod 777 "${SOCKET_PATH}" 2>/dev/null
-            log_msg "Started, pid=$!, socket=${SOCKET_PATH} (verified)"
-            return 0
-        fi
-        sleep 0.5
+read_uids() {
+    local text line count=0
+    local -a fields
+    text=$(cat -- "/proc/$1/status" 2>/dev/null) || return 1
+    while IFS= read -r line; do
+        [[ "$line" == Uid:* ]] || continue
+        ((count+=1))
+        read -r -a fields <<< "$line"
+        [[ ${#fields[@]} == 5 && "${fields[*]:1}" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]] || return 1
+        PROC_UIDS="${fields[*]:1}"
+    done <<< "$text"
+    [[ "$count" == 1 ]]
+}
+
+# 判断基准目录只取仍存在的 APP/DATA 真实目录（不是符号链接），绝不从 venv 解释器路径反推。
+# -e 会解析所有链接和 ../，再按路径分隔符比较边界，防止同前缀目录或指向外部的链接被当成本应用路径。
+read_stop_paths() {
+    local pid="$1" root kind path
+    local -a roots=()
+    PROC_EXE='' PROC_CWD='' PROC_EXE_ROOT='' PROC_CWD_ROOT=''
+    for root in "$APP_DIR" "$TRIM_PKGHOME" "$DATA_DIR"; do
+        root=$(readlink -e -- "$root" 2>/dev/null) || continue
+        [[ "$root" == /* && "$root" != / && -d "$root" ]] && roots+=("$root")
     done
-
-    log_msg "WARNING: socket not created after 5s at ${SOCKET_PATH}"
-    log_msg "SOCK_DIR exists=$([ -d "${SOCK_DIR}" ] && echo yes || echo no) writable=$([ -w "${SOCK_DIR}" ] && echo yes || echo no)"
-    log_msg "Started anyway, pid=$!"
-    return 0
+    for kind in EXE CWD; do
+        path=$(readlink -e -- "/proc/$pid/${kind,,}" 2>/dev/null) || continue
+        [[ "$path" == /* ]] || continue
+        printf -v "PROC_$kind" '%s' "$path"
+        for root in "${roots[@]}"; do
+            if [[ "$path" == "$root" || "$path" == "$root/"* ]]; then
+                printf -v "PROC_${kind}_ROOT" '%s' "$root"
+                PROC_PATH_RELATED=1
+                break
+            fi
+        done
+    done
 }
 
-stop_process() {
-    log_msg "Stopping Hermes Agent components..."
-    
-    # 1. 先停止独立诊断服务
-    if [ -r "${DIAG_PID_FILE}" ]; then
-        diag_pid=$(head -n 1 "${DIAG_PID_FILE}" | tr -d '[:space:]')
-        if kill -0 "${diag_pid}" 2>/dev/null; then
-            kill -TERM "${diag_pid}"
-            for i in $(seq 1 10); do
-                sleep 1
-                kill -0 "${diag_pid}" 2>/dev/null && continue
-                log_msg "诊断服务已停止"
-                break
-            done
-            kill -KILL "${diag_pid}" 2>/dev/null || true
-        fi
-        rm -f "${DIAG_PID_FILE}"
+# 所有身份读取共用严格快照。失败仍保留已读标签/路径，供只读残留诊断。
+# 只有 stop 请求路径采样。至少一个真实 exe/cwd 及其基准目录两次读取一致才可用。
+read_identity() {
+    local pid="$1" expected="${2:-}" expected_uids="${3:-}" paths="${4:-}"
+    local start uids entry key bad=0 exe cwd exe_root cwd_root
+    PROC_ARGS=() PROC_ENV=() PROC_START='' PROC_UIDS=''
+    PROC_PATH_RELATED=0 PROC_PATH_MATCH=0
+    APP_MATCH=0 DATA_MATCH=0 APP_FOREIGN=0 DATA_FOREIGN=0
+    PROC_REASON=stat-unreadable
+    valid_pid "$pid" || return 1
+    process_start "$pid" || bad=1
+    start="$PROC_START"
+    PROC_REASON=identity-changed
+    [[ -z "$expected" || "$start" == "$expected" ]] || bad=1
+    # 即使 status/cmdline 失败也读环境，以便报告相关但不能授权的残留。
+    read_uids "$pid" || bad=1
+    uids="$PROC_UIDS"
+    [[ -z "$expected_uids" || "$uids" == "$expected_uids" ]] || bad=1
+    if [[ "$paths" == stop ]]; then
+        read_stop_paths "$pid"
+        exe="$PROC_EXE" cwd="$PROC_CWD" exe_root="$PROC_EXE_ROOT" cwd_root="$PROC_CWD_ROOT"
     fi
-    
-    # 2. 再停止主引导进程
-    if [ -r "${PID_FILE}" ]; then
-        pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
-        if kill -0 "${pid}" 2>/dev/null; then
-            kill -TERM "${pid}"
-            for i in $(seq 1 10); do
-                sleep 1
-                kill -0 "${pid}" 2>/dev/null || { log_msg "Stopped"; rm -f "${PID_FILE}"; rm -f "${SOCKET_PATH}"; return 0; }
-            done
-            kill -KILL "${pid}"
+    read_nul "/proc/$pid/cmdline" || bad=1
+    PROC_ARGS=("${PROC_PARTS[@]}")
+    read_nul "/proc/$pid/environ" allow-empty || bad=1
+    for entry in "${PROC_PARTS[@]}"; do
+        [[ "$entry" == *=* && -n "${entry%%=*}" ]] || { bad=1; continue; }
+        key="${entry%%=*}"
+        case "$key" in
+            APP_DIR) if same_dir "${entry#*=}" "$APP_DIR"; then APP_MATCH=1; else APP_FOREIGN=1; fi ;;
+            DATA_DIR) if same_dir "${entry#*=}" "$DATA_DIR"; then DATA_MATCH=1; else DATA_FOREIGN=1; fi ;;
+        esac
+        [[ -z "${PROC_ENV[$key]+present}" ]] || bad=1
+        PROC_ENV["$key"]="${entry#*=}"
+    done
+    PROC_REASON=identity-incomplete
+    (( bad == 0 )) || return 1
+    PROC_REASON=identity-changed
+    if [[ "$paths" == stop ]]; then
+        read_stop_paths "$pid"
+        if [[ ( -n "$exe_root" && "$PROC_EXE_ROOT" == "$exe_root" && "$PROC_EXE" == "$exe" ) ||
+              ( -n "$cwd_root" && "$PROC_CWD_ROOT" == "$cwd_root" && "$PROC_CWD" == "$cwd" ) ]]; then
+            PROC_PATH_MATCH=1
         fi
-        rm -f "${PID_FILE}"
     fi
-    
-    # 兜底：监控器卡死或 PID 文件丢失时，按路径模式清理残留子进程
-    # 先杀 main 进程本身（包含诊断服务）
-    pkill -SIGKILL -f "hermes-agent.*(cmd/main|boot\.js|monitor\.js|diagnostic-server\.js)" 2>/dev/null || true
-    # 再杀 gateway|dashboard
-    pkill -SIGKILL -f "hermes-agent.*(gateway|dashboard)" 2>/dev/null || true
-    # 最后杀该目录下所有 python/node 子进程
-    pkill -SIGKILL -P ${pid} 2>/dev/null || true
-    rm -f "${SOCKET_PATH}"
-    return 0
+    read_uids "$pid" && [[ "$PROC_UIDS" == "$uids" ]] || return 1
+    process_start "$pid" && [[ "$PROC_START" == "$start" ]] || return 1
+    PROC_REASON=unverified-instance
+}
+
+declare -a PROC_ARGS=() PROC_PARTS=()
+declare -A PROC_ENV=()
+
+# start/status 仍只接受原有的精准入口。不能把任意 package UID 工作负载当 boot。
+known_command() {
+    local kind="$1"
+    local -a args=("${PROC_ARGS[@]}")
+    # 仅规范化本实例 Python 的可选 -P -m，后续仍使用原有精确参数规则。
+    if [[ ( "$kind" == gateway || "$kind" == dashboard ) &&
+          ( "${args[0]}" == "$DATA_DIR/venv/bin/python" || "${args[0]}" == "$DATA_DIR/venv/bin/python3" ) &&
+          "${args[1]}" == -P && "${args[2]}" == -m ]]; then
+        args=("${args[0]}" "${args[@]:2}")
+    fi
+    case "$kind" in
+        boot)
+            [[ ( "${args[0]##*/}" == node || "${args[0]##*/}" == nodejs ) && "${args[1]}" == "$BOOT_SCRIPT" ]] || return 1
+            ;;
+        gateway)
+            if [[ "${args[0]}" == "$DATA_DIR/venv/bin/hermes" ]]; then
+                [[ "${args[1]}" == gateway && "${args[2]}" == run ]] || return 1
+            elif [[ ( "${args[0]}" == "$DATA_DIR/venv/bin/python" || "${args[0]}" == "$DATA_DIR/venv/bin/python3" ) && "${args[1]}" == -m ]]; then
+                # 模块方式启动只有一种精确命令，仅允许可选的 --quiet。
+                [[ "${args[2]}" == hermes_cli.main && "${args[3]}" == gateway && "${args[4]}" == run &&
+                   ( ${#args[@]} == 5 || ( ${#args[@]} == 6 && "${args[5]}" == --quiet ) ) ]] || return 1
+            else
+                [[ "${args[0]##*/}" == python* && "${args[1]}" == "$DATA_DIR/venv/bin/hermes" && "${args[2]}" == gateway && "${args[3]}" == run ]] || return 1
+            fi
+            ;;
+        dashboard)
+            # 只接受手动 Dashboard 命令：不允许其他 host/port、profile 或不安全参数。
+            [[ ( "${args[0]}" == "$DATA_DIR/venv/bin/python" || "${args[0]}" == "$DATA_DIR/venv/bin/python3" ) &&
+               ${#args[@]} == 11 && "${args[1]}" == -m && "${args[2]}" == hermes_cli.main &&
+               "${args[3]}" == dashboard && "${args[4]}" == --host && "${args[5]}" == 127.0.0.1 &&
+               "${args[6]}" == --port && "${args[7]}" == 9119 && "${args[8]}" == --no-open &&
+               "${args[9]}" == --skip-build && "${args[10]}" == --isolated ]] || return 1
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+known_environment() {
+    local kind="$1"
+    same_dir "${PROC_ENV[APP_DIR]:-}" "$APP_DIR" && same_dir "${PROC_ENV[DATA_DIR]:-}" "$DATA_DIR" || return 1
+    if [[ -n "${PROC_ENV[HERMES_HOME]+present}" ]]; then
+        same_dir "${PROC_ENV[HERMES_HOME]}" "$DATA_DIR" || return 1
+    fi
+    [[ "$kind" == boot ]] && return 0
+    same_dir "${PROC_ENV[HOME]:-}" "$DATA_DIR" || return 1
+    [[ "$kind" != dashboard ]] || same_dir "${PROC_ENV[HERMES_HOME]:-}" "$DATA_DIR"
+}
+
+owned_process() {
+    read_identity "$1" "${3:-}" && known_command "$2" && known_environment "$2"
 }
 
 status() {
-    [ -f "${PID_FILE}" ] && pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]') && kill -0 "${pid}" 2>/dev/null
+    local pid
+    pid=$(read_pid) || return 3
+    owned_process "$pid" boot && [[ -S "$SOCKET_PATH" ]] && return 0
+    return 3
 }
 
-case $1 in
-start)   start_process ;;
-stop)    stop_process ;;
-status)  status && exit 0 || exit 3 ;;
-*)       exit 1 ;;
+check_ports() {
+    local name port
+    GATEWAY_PORT="${GATEWAY_PORT:-8642}"
+    WEBAPP_PORT="${WEBAPP_PORT:-9120}"
+    for name in GATEWAY_PORT WEBAPP_PORT; do
+        port="${!name}"
+        if [[ ! "$port" =~ ^[1-9][0-9]*$ || ${#port} -gt 5 ]] || (( port > 65535 )); then
+            log_msg "Invalid $name: $port"
+            return 1
+        fi
+        [[ "$port" != 9119 ]] || { log_msg "$name conflicts with Dashboard port 9119"; return 1; }
+    done
+    [[ "$GATEWAY_PORT" != "$WEBAPP_PORT" ]] || { log_msg 'Gateway and WebApp ports must differ'; return 1; }
+    export GATEWAY_PORT WEBAPP_PORT
+}
+
+health_ok() {
+    "$NODE_BIN" -e '
+const http = require("http");
+setTimeout(() => process.exit(1), 1000);
+const req = http.get({
+    socketPath: process.argv[1], path: "/app/hermes-agent/api/health",
+    headers: { "x-trim-isadmin": "true", "x-trim-userid": "lifecycle-healthcheck" }
+}, res => {
+    let body = "";
+    res.on("error", () => process.exit(1));
+    res.on("data", chunk => { body += chunk; if (body.length > 65536) process.exit(1); });
+    res.on("end", () => {
+        try { process.exit(res.statusCode === 200 && JSON.parse(body).ok === true ? 0 : 1); }
+        catch { process.exit(1); }
+    });
+});
+req.on("error", () => process.exit(1));
+' "$SOCKET_PATH" >/dev/null 2>&1
+}
+
+start_process() {
+    local pid='' entry found='' start='' deadline
+    NODE_BIN=$(command -v node) || { log_msg 'node not found'; return 1; }
+    "$NODE_BIN" --version >/dev/null 2>&1 || { log_msg 'node cannot run'; return 1; }
+    [[ -r "$BOOT_SCRIPT" ]] || { log_msg "Missing $BOOT_SCRIPT"; return 1; }
+    check_ports || return 1
+
+    # PID 文件丢失时只接管归属明确的 boot，不抢占现有 socket。
+    for entry in /proc/[0-9]*; do
+        pid="${entry##*/}"
+        if owned_process "$pid" boot; then
+            [[ -z "$found" ]] || { log_msg 'Multiple owned boot processes; stop first'; return 1; }
+            found="$pid"
+            start="$PROC_START"
+        fi
+    done
+    if [[ -n "$found" ]]; then
+        pid="$found"
+    else
+        chmod 755 "$APP_DIR" 2>/dev/null
+        log_msg "Starting $BOOT_SCRIPT; DATA_DIR=$DATA_DIR; ports=$GATEWAY_PORT/$WEBAPP_PORT"
+        HOME="$DATA_DIR" HERMES_HOME="$DATA_DIR" MONITOR_SOCKET_PATH="$SOCKET_PATH" BASE_PATH="/app/hermes-agent" "$NODE_BIN" "$BOOT_SCRIPT" >> "$LOG_FILE" 2>&1 &
+        pid=$!
+    fi
+    printf '%s\n' "$pid" > "$PID_FILE" || { log_msg 'Cannot write PID file'; return 1; }
+
+    deadline=$((SECONDS + 30))
+    while (( SECONDS < deadline )); do
+        if owned_process "$pid" boot "$start"; then
+            start="$PROC_START"
+            if [[ -S "$SOCKET_PATH" ]]; then
+                chmod 777 "$SOCKET_PATH" 2>/dev/null
+                if (( SECONDS + 1 < deadline )) && health_ok && owned_process "$pid" boot "$start" && [[ -S "$SOCKET_PATH" ]] && (( SECONDS < deadline )); then
+                    log_msg "Started, pid=$pid; health ok"
+                    return 0
+                fi
+            fi
+        elif [[ -n "$start" || ! -d "/proc/$pid" ]]; then
+            log_msg "Boot exited or ownership changed, pid=$pid"
+            return 1
+        fi
+        (( SECONDS < deadline )) && sleep 0.2
+    done
+    log_msg "Health check failed within 30s, pid=$pid; inspect info.log"
+    return 1
+}
+
+# 仅在 stop 中启用 NSS 账户扩展。用户名、数字反查、完整枚举均须一致，
+# root、共享 UID、重复账户和 NSS 读取失败都不能授权任意工作负载。
+package_uid() {
+    local record reverse records line name password uid gid gecos home shell extra count=0
+    PACKAGE_UID=''
+    record=$(getent passwd hermes-agent) || return 1
+    [[ "$record" != *$'\n'* ]] || return 1
+    IFS=: read -r name password uid gid gecos home shell extra <<< "$record"
+    [[ "$name" == hermes-agent && "$uid" =~ ^[1-9][0-9]*$ && -n "$shell" && -z "$extra" ]] || return 1
+    reverse=$(getent passwd "$uid") && [[ "$reverse" == "$record" ]] || return 1
+    records=$(getent passwd) || return 1
+    while IFS= read -r line; do
+        IFS=: read -r name password gid extra gecos home shell <<< "$line"
+        [[ -n "$name" && "$gid" =~ ^(0|[1-9][0-9]*)$ && -n "$shell" && "$shell" != *:* ]] || return 1
+        if [[ "$name" == hermes-agent || "$gid" == "$uid" ]]; then
+            [[ "$line" == "$record" ]] || return 1
+            ((count+=1))
+        fi
+    done <<< "$records"
+    [[ "$count" == 1 ]] || return 1
+    PACKAGE_UID="$uid"
+}
+
+protect_stop_ancestors() {
+    local pid="$BASHPID" start parent depth
+    for ((depth=0; depth<128; depth++)); do
+        process_start "$pid" || return 1
+        start="$PROC_START" parent="$PROC_PARENT"
+        [[ -z "${STOP_EXCLUDED[$pid]+present}" ]] || return 1
+        STOP_EXCLUDED[$pid]="$start"
+        process_start "$pid" && [[ "$PROC_START" == "$start" && "$PROC_PARENT" == "$parent" ]] || return 1
+        [[ "$pid" == 1 || "$parent" == 0 ]] && return 0
+        pid="$parent"
+    done
+    return 1
+}
+
+stop_excluded() {
+    [[ -n "$PROC_START" && "${STOP_EXCLUDED[$1]:-}" == "$PROC_START" ]]
+}
+
+package_uids_match() {
+    [[ -n "$PACKAGE_UID" && "$PROC_UIDS" == "$PACKAGE_UID $PACKAGE_UID $PACKAGE_UID $PACKAGE_UID" ]]
+}
+
+classify_stop() {
+    local kind key expected
+    for kind in boot gateway dashboard; do
+        if known_command "$kind" && known_environment "$kind"; then
+            STOP_KIND="$kind"
+            return 0
+        fi
+    done
+    # 原有的精确匹配入口保持原含义。其他通用工作进程必须使用本应用专属 UID，且任何显式标签都不能冲突。
+    PROC_REASON=package-uid-unverified
+    package_uids_match || return 1
+    PROC_REASON=instance-tags-conflict
+    for key in APP_DIR DATA_DIR HOME HERMES_HOME; do
+        [[ -n "${PROC_ENV[$key]+present}" ]] || continue
+        expected="$DATA_DIR"
+        [[ "$key" != APP_DIR ]] || expected="$APP_DIR"
+        same_dir "${PROC_ENV[$key]}" "$expected" || return 1
+    done
+    PROC_REASON=instance-tags-or-paths-unverified
+    (( (APP_MATCH && DATA_MATCH) || PROC_PATH_MATCH )) || return 1
+    STOP_KIND=workload
+}
+
+instance_related() {
+    local entry
+    # 同 UID 的 systemd 用户管理器不属于应用。只按实例标签和路径报告残留。
+    (( (APP_MATCH && DATA_MATCH) || PROC_PATH_RELATED )) && return 0
+    (( APP_FOREIGN || DATA_FOREIGN )) && return 1
+    (( APP_MATCH || DATA_MATCH )) && return 0
+    for entry in "${PROC_ARGS[@]}"; do
+        case "$entry" in
+            *"$APP_DIR/"*|*"$TRIM_PKGHOME/"*|*"$DATA_DIR/"*) return 0 ;;
+        esac
+    done
+    known_command boot || known_command gateway || known_command dashboard
+}
+
+stop_snapshot() {
+    local entry pid ok reason
+    STOP_PIDS=() STOP_KINDS=() STOP_REMAINS=0
+    for entry in /proc/[0-9]*; do
+        pid="${entry##*/}"
+        valid_pid "$pid" || continue
+        ok=0
+        read_identity "$pid" '' '' stop && ok=1
+        reason="$PROC_REASON"
+        stop_excluded "$pid" && continue
+        if (( ok )) && classify_stop; then
+            if [[ -z "${STOP_STARTS[$pid]+present}" ]]; then
+                STOP_STARTS[$pid]="$PROC_START" STOP_UIDS[$pid]="$PROC_UIDS"
+            fi
+            if [[ "${STOP_STARTS[$pid]}" == "$PROC_START" && "${STOP_UIDS[$pid]}" == "$PROC_UIDS" ]]; then
+                STOP_PIDS+=("$pid") STOP_KINDS+=("$STOP_KIND")
+                reason=owned-process-running
+            else
+                reason=identity-changed
+            fi
+        else
+            (( ok )) && reason="$PROC_REASON"
+            instance_related || {
+                # 已认领的同一进程失去可读身份也必须报告，不能误报已停止。
+                [[ -n "${STOP_STARTS[$pid]+present}" && -d "/proc/$pid" ]] || continue
+            }
+        fi
+        # 已退出的僵尸不是运行中的工作负载，也不能接收信号。
+        if process_stat "$pid" && [[ "$PROC_STATE" == Z || "$PROC_STATE" == X ]]; then continue; fi
+        [[ -d "/proc/$pid" ]] || continue
+        STOP_REMAINS=1
+        if [[ "${STOP_FINAL:-0}" == 1 ]]; then log_msg "Stop incomplete pid=$pid reason=$reason"; fi
+    done
+}
+
+signal_stop() {
+    local pid="$1" kind="$2" signal="$3"
+    # 每次发送 TERM/KILL 前，重新核对进程的完整身份、四个 UID（真实/有效/保存/文件系统）、启动时间 starttime，以及两次读取一致的真实路径。
+    # realpath 仅能与专属 UID 联合授权。PID 文件、进程树、argv 子串/-c 不能授权。
+    read_identity "$pid" "${STOP_STARTS[$pid]}" "${STOP_UIDS[$pid]}" stop &&
+        ! stop_excluded "$pid" && classify_stop && [[ "$STOP_KIND" == "$kind" ]] || return 1
+    kill "-$signal" -- "$pid" 2>/dev/null
+    local rc=$?
+    log_msg "SIG$signal $kind pid=$pid result=$rc"
+    return "$rc"
+}
+
+terminate_owned() {
+    local phase="$1" deadline=$((SECONDS + 35)) hard rounds quiet=0 index pid kind signal active
+    hard=$((deadline + 3))
+    [[ "$phase" == boot && "$BOOT_SIGNAL" == KILL ]] && hard=$((SECONDS + 3))
+    # 时限之外还有轮数上限，每轮重扫以覆盖孤儿、任务脚本和停机新生进程。
+    for ((rounds=0; rounds<200; rounds++)); do
+        stop_snapshot
+        active=0
+        for kind in boot gateway dashboard workload; do
+            [[ "$phase" != boot || "$kind" == boot ]] || continue
+            for index in "${!STOP_PIDS[@]}"; do
+                [[ "${STOP_KINDS[$index]}" == "$kind" ]] || continue
+                active=1
+                pid="${STOP_PIDS[$index]}"
+                signal=TERM
+                if (( SECONDS >= deadline )) || [[ "$kind" == boot && "$BOOT_SIGNAL" == KILL ]]; then signal=KILL; fi
+                [[ "${STOP_SENT[$pid]:-}" == KILL || "${STOP_SENT[$pid]:-}" == "$signal" ]] && continue
+                signal_stop "$pid" "$kind" "$signal" || true
+                STOP_SENT[$pid]="$signal"
+            done
+        done
+        if (( active == 0 )); then ((quiet+=1)); else quiet=0; fi
+        (( quiet >= 2 )) && return 0
+        (( SECONDS >= hard )) && return 1
+        sleep 0.2
+    done
+    return 1
+}
+
+cleanup_stale_pids() {
+    local file value
+    for file in "$PID_FILE" "$VAR_DIR/gateway.pid" "$VAR_DIR/dashboard.pid"; do
+        [[ -f "$file" && ! -L "$file" && -r "$file" ]] || continue
+        value=$(< "$file")
+        valid_pid "$value" || continue
+        if [[ -d "/proc/$value" ]]; then
+            process_stat "$value" && [[ "$PROC_STATE" == Z || "$PROC_STATE" == X ]] || continue
+        fi
+        # 不清理仍存活/未知进程的引用，也不跟随 symlink，重读防止覆盖新引用。
+        [[ ! -L "$file" && "$(< "$file")" == "$value" ]] || continue
+        rm -f -- "$file" || return 1
+    done
+}
+
+stop_process() {
+    local PACKAGE_UID='' BOOT_SIGNAL=KILL monitor STOP_KIND STOP_REMAINS STOP_FINAL=0
+    local -A STOP_EXCLUDED=() STOP_STARTS=() STOP_UIDS=() STOP_SENT=()
+    local -a STOP_PIDS=() STOP_KINDS=()
+    log_msg 'Stopping owned Hermes Agent processes'
+    protect_stop_ancestors || { log_msg 'Stop incomplete reason=ancestor-identity-unavailable'; return 1; }
+    package_uid || PACKAGE_UID=''
+    if monitor=$(cat -- "$APP_DIR/server/monitor.js" 2>/dev/null) &&
+        [[ "$monitor" != *pkill* && "$monitor" != *forceKillHermes* ]]; then BOOT_SIGNAL=TERM; fi
+    # 未知/旧 monitor 不执行可能误杀其他应用的 shutdown handler。
+    terminate_owned boot || log_msg 'Boot stop deadline reached'
+    terminate_owned all || log_msg 'Workload stop deadline reached'
+    STOP_FINAL=1
+    stop_snapshot
+    (( STOP_REMAINS == 0 )) || return 1
+    cleanup_stale_pids || { log_msg 'Stop incomplete reason=pid-cleanup-failed'; return 1; }
+    # 不删除 socket、数据或未知 PID 引用。
+    log_msg 'Stopped'
+}
+
+case "${1:-}" in
+    start) start_process ;;
+    stop) stop_process ;;
+    status) status ;;
+    *) exit 1 ;;
 esac

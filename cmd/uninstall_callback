@@ -1,15 +1,155 @@
 #!/bin/bash
+# BEGIN shared hook logging：以下公共日志块在六个钩子中保持一致。
+HOOK_LOG_FILE=/tmp/install_hermes_agent.log
+HOOK_NAME="${0##*/}"
+HOOK_STAGE=logging
+HOOK_LOG_READY=0
+exec {HOOK_ORIGINAL_STDERR}>&2
+
+hook_append_toast() {
+    local file="${TRIM_TEMP_LOGFILE:-}"
+    [[ -n "$file" ]] || return 0
+    if [[ -L "$file" || ( -e "$file" && ! -f "$file" ) ]]; then
+        printf 'ERROR: refusing non-regular fnOS toast file: %s\n' "$file" >&2
+        return 0
+    fi
+    # 只追加，不覆盖 fnOS 或 helper 已写入的更具体提示。
+    { if [[ -s "$file" ]]; then printf '\n'; fi; printf '%s\n' "$*"; } >> "$file" ||
+        printf 'ERROR: cannot append fnOS failure notice: %s\n' "$file" >&2
+    return 0
+}
+
+hook_record() {
+    printf '%s [%s] %s rc=%s stage=%s uid=%s TRIM_APPDEST=%q TRIM_PKGHOME=%q TRIM_PKGVAR=%q\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S%z')" "$HOOK_NAME" "$1" "$2" "$HOOK_STAGE" "$EUID" \
+        "${TRIM_APPDEST:-}" "${TRIM_PKGHOME:-}" "${TRIM_PKGVAR:-}"
+}
+
+# 失败时摘录本次运行写入日志的最后几行，让 fnOS 对话框直接显示具体原因。
+hook_log_excerpt() {
+    local line toast="${TRIM_TEMP_LOGFILE:-}"
+    local -a lines=()
+    [[ "$HOOK_LOG_READY" == 1 && -r "$HOOK_LOG_FILE" ]] || return 0
+    while IFS= read -r line; do
+        if [[ "$line" == *" [$HOOK_NAME] BEGIN rc=- "* ]]; then lines=(); continue; fi
+        [[ -n "$line" && "$line" != *" [$HOOK_NAME] END rc="* ]] || continue
+        # 已由 toast_err 写入提示文件的原文不再重复。
+        if [[ -f "$toast" ]] && grep -qxF -- "$line" "$toast" 2>/dev/null; then continue; fi
+        lines+=("${line:0:300}")
+        (( ${#lines[@]} <= 8 )) || lines=("${lines[@]:1}")
+    done < <(tail -n 200 -- "$HOOK_LOG_FILE" 2>/dev/null)
+    (( ${#lines[@]} )) || return 0
+    printf '日志摘录：\n'
+    printf '  %s\n' "${lines[@]}"
+}
+
+hook_exit() {
+    local rc="$1" notice excerpt=""
+    trap - EXIT ERR
+    if [[ "$HOOK_LOG_READY" == 1 ]]; then
+        if ! hook_record END "$rc"; then
+            HOOK_LOG_READY=0
+            printf 'ERROR: cannot write END (rc=%s) to %s\n' "$rc" "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+        fi
+    else
+        hook_record BEGIN - >&"$HOOK_ORIGINAL_STDERR" || :
+        hook_record END "$rc" >&"$HOOK_ORIGINAL_STDERR" || :
+    fi
+    if (( rc != 0 )); then
+        notice="${HOOK_NAME} 阶段 ${HOOK_STAGE} 失败（退出码 ${rc}，行 ${HOOK_FAILED_LINE:-unknown}）；日志：${HOOK_LOG_FILE}"
+        if [[ "$HOOK_LOG_READY" != 1 ]]; then
+            notice="${notice}（日志不可写，未能完整保存）"
+            printf '%s\n' "$notice" >&"$HOOK_ORIGINAL_STDERR"
+        else
+            excerpt="$(hook_log_excerpt)"
+            printf '%s\n' "$notice" >&2
+        fi
+        hook_append_toast "$notice${excerpt:+$'\n'$excerpt}"
+    fi
+    exit "$rc"
+}
+trap 'hook_exit "$?"' EXIT
+
+# 仅首次创建时使用私有 umask 和 noclobber 独占打开。
+if [[ -L "$HOOK_LOG_FILE" || ( -e "$HOOK_LOG_FILE" && ! -f "$HOOK_LOG_FILE" ) ]]; then
+    printf 'ERROR: refusing symlink or non-regular hook log: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+    exit 1
+fi
+if [[ ! -e "$HOOK_LOG_FILE" ]]; then
+    (umask 077; set -o noclobber; : > "$HOOK_LOG_FILE") || {
+        printf 'ERROR: cannot create hook log: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+        exit 1
+    }
+fi
+if [[ -L "$HOOK_LOG_FILE" || ! -f "$HOOK_LOG_FILE" || ! -w "$HOOK_LOG_FILE" ]]; then
+    printf 'ERROR: hook log is not a writable regular file: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+    exit 1
+fi
+if ! { exec >> "$HOOK_LOG_FILE" 2>&1; }; then
+    printf 'ERROR: cannot append hook log: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+    exit 1
+fi
+# 写入前再校验已打开的文件本身，而不只是打开前的路径名。
+if [[ -L "$HOOK_LOG_FILE" || ! -f /proc/self/fd/1 || ! "$HOOK_LOG_FILE" -ef /proc/self/fd/1 ]]; then
+    printf 'ERROR: hook log changed while opening: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+    exit 1
+fi
+if ! { printf '\n%s\n' '------------------------------------------------------------------------' && hook_record BEGIN -; }; then
+    printf 'ERROR: cannot write BEGIN to hook log: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+    exit 1
+fi
+HOOK_LOG_READY=1
+HOOK_STAGE=path-validation
+# END shared hook logging：公共日志块结束。
+
 
 ### 卸载后回调
 ### wizard_delete_data="true"  → 删除全部数据
 ### wizard_delete_data="false" → 保留全部（venv + 数据 + uv），升级时不破坏环境
 
-[ -z "${TRIM_PKGHOME}" ] && exit 0
-
-if [ "${wizard_delete_data}" = "true" ]; then
-    rm -rf "${TRIM_PKGHOME}/data"
-    [ -n "${TRIM_PKGVAR}" ] && rm -rf "${TRIM_PKGVAR}" 2>/dev/null || true
+HOOK_STAGE=delete-data-choice
+printf 'wizard_delete_data=%q (true=delete, false=preserve)\n' "${wizard_delete_data:-}"
+UNINSTALL_RC=0
+if [ "${wizard_delete_data:-}" = "true" ]; then
+    HOOK_STAGE=validate-delete-paths
+    for name in TRIM_PKGHOME TRIM_PKGVAR; do
+        value="${!name}"
+        case "$value" in
+            /*) ;;
+            *) printf 'Invalid deletion path: %s\n' "$name" >&2; exit 1 ;;
+        esac
+        while [[ "$value" == */ && "$value" != / ]]; do value="${value%/}"; done
+        case "$value/" in
+            /|//|*/../*|*/./*) printf 'Invalid deletion path: %s\n' "$name" >&2; exit 1 ;;
+        esac
+        printf -v "$name" '%s' "$value"
+    done
+    if [[ -L "$TRIM_PKGVAR" || -L "$TRIM_PKGHOME/data" ]]; then
+        printf 'Deletion target is a symlink; data preserved for manual confirmation.\n' >&2
+        exit 1
+    fi
+    HOOK_STAGE=delete-data
+    printf 'Deleting data target: %q\n' "${TRIM_PKGHOME}/data"
+    if rm -rf "${TRIM_PKGHOME}/data"; then
+        printf 'Data deletion completed: %q\n' "${TRIM_PKGHOME}/data"
+    else
+        UNINSTALL_RC=$?
+        printf 'ERROR: data deletion failed rc=%s target=%q\n' "$UNINSTALL_RC" "${TRIM_PKGHOME}/data" >&2
+    fi
+    if [ -n "${TRIM_PKGVAR}" ]; then
+        printf 'Deleting var target: %q\n' "${TRIM_PKGVAR}"
+        if rm -rf "${TRIM_PKGVAR}"; then
+            printf 'Var deletion completed: %q\n' "${TRIM_PKGVAR}"
+        else
+            delete_rc=$?
+            printf 'ERROR: var deletion failed rc=%s target=%q\n' "$delete_rc" "${TRIM_PKGVAR}" >&2
+            [[ "$UNINSTALL_RC" != 0 ]] || UNINSTALL_RC="$delete_rc"
+        fi
+    else
+        printf 'TRIM_PKGVAR is empty; var deletion skipped.\n'
+    fi
+else
+    printf 'Deletion not requested; preserving data=%q var=%q\n' "${TRIM_PKGHOME}/data" "${TRIM_PKGVAR:-}"
 fi
 
-
-exit 0
+exit "$UNINSTALL_RC"

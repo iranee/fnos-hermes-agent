@@ -32,6 +32,7 @@ import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import qrcode from 'qrcode-terminal';
 import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
+import { createWhatsAppProxy } from './proxy.js';
 import { createOutboundIdTracker } from './outbound_ids.js';
 import { classifyOwnerMessageGate } from './owner_message_gate.js';
 import {
@@ -257,7 +258,7 @@ function buildLidMap() {
 }
 let lidToPhone = buildLidMap();
 
-const logger = pino({ level: 'warn' });
+const logger = pino({ level: PAIR_JSON ? 'silent' : 'warn' });
 
 // Message queue for polling
 const messageQueue = [];
@@ -379,6 +380,26 @@ function rememberSentId(id) {
 
 let sock = null;
 let connectionState = 'disconnected';
+let network;
+let stopping = false;
+let reconnectTimer;
+
+async function shutdown(code) {
+  if (stopping) return;
+  stopping = true;
+  clearTimeout(reconnectTimer);
+  // Close only this bridge's socket/agents. Never log out or delete saved auth state.
+  const deadline = setTimeout(() => process.exit(code), 1000);
+  deadline.unref();
+  try { sock?.end(new Error('bridge stopped')); } catch {}
+  try { await network?.close(); } finally { process.exit(code); }
+}
+function socketFailed() {
+  emitPairEvent({ event: 'error', error: 'WhatsApp 网络连接失败，请检查统一代理配置' });
+  void shutdown(1);
+}
+process.once('SIGTERM', () => { void shutdown(0); });
+process.once('SIGINT', () => { void shutdown(0); });
 
 function emitPairEvent(event) {
   if (!PAIR_JSON) return;
@@ -388,10 +409,15 @@ function emitPairEvent(event) {
 }
 
 async function startSocket() {
+  if (stopping) return;
+  network ||= await createWhatsAppProxy(process.env, { required: PAIR_ONLY });
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
-  const { version } = await fetchLatestBaileysVersion();
+  const { version, error } = await fetchLatestBaileysVersion(network.fetchOptions);
+  if (error) throw new Error('WhatsApp version request failed');
+  if (stopping) return;
 
   sock = makeWASocket({
+    ...network.socketOptions,
     version,
     auth: state,
     logger,
@@ -411,6 +437,7 @@ async function startSocket() {
   sock.ev.on('creds.update', () => { saveCreds(); lidToPhone = buildLidMap(); });
 
   sock.ev.on('connection.update', (update) => {
+    if (stopping) return;
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
@@ -432,7 +459,7 @@ async function startSocket() {
         if (!PAIR_JSON) {
           console.log('❌ Logged out. Delete session and restart to re-authenticate.');
         }
-        process.exit(1);
+        void shutdown(1);
       } else {
         // 515 = restart requested (common after pairing). Always reconnect.
         emitPairEvent({ event: 'disconnected', reason });
@@ -443,7 +470,8 @@ async function startSocket() {
             console.log(`⚠️  Connection closed (reason: ${reason}). Reconnecting in 3s...`);
           }
         }
-        setTimeout(startSocket, reason === 515 ? 1000 : 3000);
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(() => startSocket().catch(socketFailed), reason === 515 ? 1000 : 3000);
       }
     } else if (connection === 'open') {
       connectionState = 'connected';
@@ -462,7 +490,8 @@ async function startSocket() {
           console.log('✅ Pairing complete. Credentials saved.');
         }
         // Give Baileys a moment to flush creds, then exit cleanly
-        setTimeout(() => process.exit(0), 2000);
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(() => { void shutdown(0); }, 2000);
       }
     }
   });
@@ -715,7 +744,7 @@ async function startSocket() {
         senderNumber,
         botIds,
         isGroup,
-        downloadMedia: async (mediaMsg) => downloadMediaMessage(mediaMsg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage }),
+        downloadMedia: async (mediaMsg) => downloadMediaMessage(mediaMsg, 'buffer', network.mediaOptions, { logger, reuploadRequest: sock.updateMediaMessage }),
         cacheDirs: {
           image: IMAGE_CACHE_DIR,
           document: DOCUMENT_CACHE_DIR,
@@ -1088,13 +1117,7 @@ if (PAIR_ONLY) {
     console.log(`📁 Session: ${SESSION_DIR}`);
     console.log();
   }
-  startSocket().catch((err) => {
-    emitPairEvent({ event: 'error', error: err?.message || String(err) });
-    if (!PAIR_JSON) {
-      console.error(err);
-    }
-    process.exit(1);
-  });
+  startSocket().catch(socketFailed);
 } else {
   app.listen(PORT, '127.0.0.1', () => {
     console.log(`🌉 WhatsApp bridge listening on port ${PORT} (mode: ${WHATSAPP_MODE})`);
@@ -1114,6 +1137,6 @@ if (PAIR_ONLY) {
       console.log(`👤 WHATSAPP_FORWARD_OWNER_MESSAGES=true — owner-typed messages will be forwarded with fromOwner:true`);
     }
     console.log();
-    startSocket();
+    startSocket().catch(socketFailed);
   });
 }

@@ -1,9 +1,9 @@
-// primary-config.js — 主模型配置读写模块（ consolidated）
+// primary-config.js — 主模型配置读写模块（整合版）
 // 职责：providers-state.yaml 解析 / 序列化写入、config.yaml 的 model 段 + providers 段
 // 构建与写入、.env.providers 保存与旧格式迁移、active provider key 同步到 Hermes .env、
 // 已删除服务商的 key 清理，以及真实 API key 解析（resolveRealApiKey）。
 // 
-// CONSOLIDATION: 此文件整合了以下模块的功能：
+// 本文件整合了以下模块的功能：
 // - provider-config.js (PROVIDER_PRESETS, PROVIDER_MODELS, PROVIDER_API_KEYS, etc.)
 // - fallback-config.js (parseFallback, syncFallbackKeysToHermesEnv)
 // - api-format.js (detectApiFormat, probeApiFormat, apiModeForFormat, normalizeApiFormat)
@@ -12,7 +12,11 @@
 // - chat-hardening.js (createCheckpointer, resumeStreamingMessages)
 //
 // 路径 / 日志 / 本机令牌等共用设施由 monitor.js 经 initPrimaryConfig 注入，本模块不重复定义。
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, lstatSync, openSync, closeSync, fsyncSync, renameSync, unlinkSync } from "fs";
+import { spawnSync } from "child_process";
+import { fileURLToPath } from "url";
+import { resolve } from "path";
+import { randomUUID } from "crypto";
 
 // ─── 注入的运行时依赖 ─────────────────────────────────────────────────────
 let P = {
@@ -20,51 +24,33 @@ let P = {
   dataDir: "",          // DATA_DIR（config.yaml / Hermes .env 所在目录）
   log: () => {},        // monitor.js 的日志函数
   monitorToken: "",     // 本机监控令牌（LOCAL / hermes provider 直接用它鉴权）
+  pythonBin: "",        // 默认 dataDir/venv/bin/python。必须能 import 官方 hermes_cli
+  env: {},              // 子进程环境补充，例如只读官方源码的 PYTHONPATH
+  networkProxy: null,    // 面板统一网络组件，在线请求必须注入，不回退原生 fetch
 };
 
+const NETWORK_PROXY_REQUIRED = "网络组件未初始化，请检查统一代理配置";
+const NETWORK_REQUEST_FAILED = "网络组件请求失败，请检查统一代理配置";
+
 export function initPrimaryConfig(deps) {
-  P = { ...P, ...deps };
+  P = { ...P, ...deps, networkProxy: deps.networkProxy || null };
 }
 
 // ─── 真实 API key 解析 ────────────────────────────────────────────────────
-// 优先级：LOCAL/hermes → 明文 api_key → 进程环境变量 → .env.providers（含旧名兜底）
-// → Hermes .env（含旧名兜底）；任何读取异常一律返回 null（非致命）。
+// 临时测试明文优先，持久凭证只通过 Hermes resolver + DATA/.env 解析。
+// 不从进程旧 export、VAR/.env.providers 或 providers-state 回灌。
 export function resolveRealApiKey(provider) {
-  if (provider.base_url === "LOCAL" || provider.id === "hermes") {
-    return P.monitorToken;
-  }
-  if (provider.api_key && !provider.api_key.startsWith("****")) {
-    return provider.api_key;
-  }
-  const envKey = PROVIDER_API_KEYS[provider.id] || PROVIDER_API_KEYS[provider.name] || customEnvKey(provider.id);
+  if (!provider || typeof provider !== "object") return null;
+  if (!provider.source && (provider.base_url === "LOCAL" || provider.id === "hermes")) return P.monitorToken;
+  const temporary = [provider._raw_api_key, provider.api_key].find(value =>
+    typeof value === "string" && value && !value.includes("****") && !value.includes("${") &&
+    !value.startsWith("<redacted") && !/[\r\n\0]/.test(value));
+  if (temporary) return temporary;
   try {
-    const fromEnv = process.env[envKey];
-    if (fromEnv) return fromEnv;
-    const envProvPath = `${P.varDir}/.env.providers`;
-    if (existsSync(envProvPath)) {
-      const provEnv = readFileSync(envProvPath, "utf8");
-      const m = provEnv.match(new RegExp(`^${envKey}=(.*)$`, "m"));
-      if (m && m[1]) return m[1].trim();
-      // 兼容旧名 CUSTOM_PROVIDER_*
-      if (!PROVIDER_API_KEYS[provider.id] && !PROVIDER_API_KEYS[provider.name]) {
-        const legKey = legacyCustomEnvKey(provider.id);
-        const m2 = provEnv.match(new RegExp(`^${legKey}=(.*)$`, "m"));
-        if (m2 && m2[1]) return m2[1].trim();
-      }
-    }
-    // 兜底：DATA_DIR/.env
-    const hermesEnvPath = `${P.dataDir}/.env`;
-    if (existsSync(hermesEnvPath)) {
-      const hEnv = readFileSync(hermesEnvPath, "utf8");
-      const mh = hEnv.match(new RegExp(`^${envKey}=(.*)$`, "m"));
-      if (mh && mh[1]) return mh[1].trim();
-      if (!PROVIDER_API_KEYS[provider.id] && !PROVIDER_API_KEYS[provider.name]) {
-        const legKey = legacyCustomEnvKey(provider.id);
-        const m2 = hEnv.match(new RegExp(`^${legKey}=(.*)$`, "m"));
-        if (m2 && m2[1]) return m2[1].trim();
-      }
-    }
-    return null;
+    // New snapshot IDs are already Hermes IDs. Only old callers without source need the
+    // panel's historical openai -> openai-api adapter.
+    const id = provider.source ? provider.id : (PROVIDER_HERMES_IDS[provider.id] || provider.id);
+    return runModelConfig({ action: "resolve-key", id, source: provider.source }).api_key || null;
   } catch { return null; }
 }
 
@@ -72,7 +58,12 @@ export function resolveRealApiKey(provider) {
 // 解析格式: providers:\n  id:\n    model: xxx\n    base_url: yyy\n    name: "zzz"
 export function parseProvidersState(stateYaml) {
   const map = {};
-  const blockMatch = String(stateYaml || "").match(/^providers:\n([\s\S]*)$/m);
+  const blockMatch = String(stateYaml || "").replace(/\r\n/g, "\n").match(/^providers:\n([\s\S]*)$/m);
+  const scalar = text => {
+    const value = text.trim();
+    if (value.startsWith('"')) return JSON.parse(value);
+    return value; // 旧版面板 state 中 model / base_url 不带引号。
+  };
   if (!blockMatch) return map;
   const lines = blockMatch[1].split("\n");
   let curId = null, curModel = "", curBase = "", curName = "", curTemp = null, curMax = null, curFmt = "";
@@ -90,9 +81,9 @@ export function parseProvidersState(stateYaml) {
       return;
     }
     const m = line.match(/^    model:\s*(.+)\s*$/);
-    if (m && curId) { curModel = m[1].trim(); return; }
+    if (m && curId) { curModel = scalar(m[1]); return; }
     const b = line.match(/^    base_url:\s*(.+)\s*$/);
-    if (b && curId) { curBase = b[1].trim(); return; }
+    if (b && curId) { curBase = scalar(b[1]); return; }
     const n = line.match(/^    name:\s*(.+)\s*$/);
     if (n && curId) { try { curName = JSON.parse(n[1].trim()); } catch { curName = n[1].trim(); } }
     const t = line.match(/^    temperature:\s*(.+)\s*$/);
@@ -100,263 +91,439 @@ export function parseProvidersState(stateYaml) {
     const x = line.match(/^    max_tokens:\s*(.+)\s*$/);
     if (x && curId) { const xv = parseInt(x[1].trim(), 10); if (!isNaN(xv)) curMax = xv; }
     const f = line.match(/^    api_format:\s*(.+)\s*$/);
-    if (f && curId) { curFmt = normalizeApiFormat(f[1]); }
+    if (f && curId) { curFmt = normalizeApiFormat(scalar(f[1])); }
   });
   flush();
   return map;
 }
 
-// 读取并解析 providers-state.yaml；文件不存在返回空映射，读取异常向上抛出由调用方决定处置
+// 读取并解析 providers-state.yaml。文件不存在返回空映射，读取异常向上抛出由调用方决定处置
 export function loadProvidersState() {
   const statePath = `${P.varDir}/providers-state.yaml`;
   if (!existsSync(statePath)) return {};
   return parseProvidersState(readFileSync(statePath, "utf8"));
 }
 
-// ─── providers-state.yaml 序列化写入（写失败为非致命，静默忽略） ──────────
-export function writeProvidersState(allProvConfig, activeProviderId) {
+// ─── 模型保存的验证、前置准备与逐文件提交 ───────────────────────────────
+function validateId(id) {
+  if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(id) ||
+      ["constructor", "prototype", "__proto__"].includes(id)) {
+    throw new TypeError("invalid provider id");
+  }
+  return id;
+}
+
+function singleLine(value, field) {
+  if (typeof value !== "string" || /[\r\n\0]/.test(value)) {
+    throw new TypeError(`${field} must be a string without newline/NUL`);
+  }
+  return value;
+}
+
+function validateConfigs(configs, active, fallbackIds) {
+  if (!configs || typeof configs !== "object" || Array.isArray(configs)) throw new TypeError("invalid allProvConfig");
+  validateId(active);
+  if (!Object.hasOwn(configs, active)) throw new TypeError("active provider is not configured");
+  const envOwners = new Map();
+  for (const [id, cfg] of Object.entries(configs)) {
+    validateId(id);
+    if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) throw new TypeError("invalid provider config");
+    if (!singleLine(cfg.model, "model").trim()) throw new TypeError("model is required");
+    for (const field of ["base_url", "name", "api_format"]) {
+      if (cfg[field] != null) singleLine(cfg[field], field);
+    }
+    if (cfg.api_format && !["openai", "anthropic", "anthropic_messages", "chat_completions"].includes(cfg.api_format)) {
+      throw new TypeError("invalid api_format");
+    }
+    if (cfg.temperature != null && (typeof cfg.temperature !== "number" || !Number.isFinite(cfg.temperature))) throw new TypeError("invalid temperature");
+    if (cfg.max_tokens != null && (!Number.isSafeInteger(cfg.max_tokens) || cfg.max_tokens < 1)) throw new TypeError("invalid max_tokens");
+    const key = providerEnvKey(id);
+    if (envOwners.has(key)) throw new TypeError("provider ids collide on an environment variable");
+    envOwners.set(key, id);
+  }
+  if (fallbackIds != null) {
+    if (!Array.isArray(fallbackIds)) throw new TypeError("invalid fallbackIds");
+    const seen = new Set();
+    for (const id of fallbackIds) {
+      validateId(id);
+      if (!Object.hasOwn(configs, id) || id === active || seen.has(id)) throw new TypeError("invalid fallback provider");
+      seen.add(id);
+    }
+  }
+}
+
+function providerEnvKey(id) {
+  validateId(id);
+  return Object.hasOwn(PROVIDER_API_KEYS, id) ? PROVIDER_API_KEYS[id] : customEnvKey(id);
+}
+
+// 只有 ENOENT 表示文件不存在。不掩盖权限错误，不跟随符号链接。
+function snapshot(path) {
   try {
-    const stateLines = Object.entries(allProvConfig)
-      .sort(([a], [b]) => {
-        // active provider 排第一，其余按 id 字母排序
-        if (a === activeProviderId) return -1;
-        if (b === activeProviderId) return 1;
-        return a.localeCompare(b);
-      })
-      .map(([id, cfg]) => {
-        let entry = `  ${id}:\n    model: ${cfg.model}`;
-        if (cfg.base_url) entry += `\n    base_url: ${cfg.base_url}`;
-        if (cfg.name) entry += `\n    name: ${JSON.stringify(cfg.name)}`;
-        if (cfg.temperature != null) entry += `\n    temperature: ${cfg.temperature}`;
-        if (cfg.max_tokens != null) entry += `\n    max_tokens: ${cfg.max_tokens}`;
-        if (cfg.api_format) entry += `\n    api_format: ${cfg.api_format}`;
-        return entry;
-      })
-      .join("\n");
-    const stateContent = `providers:\n${stateLines}\n`;
-    writeFileSync(`${P.varDir}/providers-state.yaml`, stateContent);
-  } catch (e) {}
+    const stat = lstatSync(path);
+    if (!stat.isFile()) throw new Error(`not a regular file: ${path}`);
+    return { path, content: readFileSync(path, "utf8"), mode: stat.mode & 0o777 };
+  } catch (e) {
+    if (e.code === "ENOENT") return { path, content: null, mode: 0o600 };
+    throw e;
+  }
+}
+
+function stageFile(before, content) {
+  const staged = { ...before, next: content, temp: `${before.path}.${randomUUID()}.tmp` };
+  try {
+    const fd = openSync(staged.temp, "wx", before.mode);
+    try { writeFileSync(fd, content, "utf8"); fsyncSync(fd); } finally { closeSync(fd); }
+  } catch (e) {
+    try { unlinkSync(staged.temp); } catch (cleanup) { if (cleanup.code !== "ENOENT") e.cleanupError = cleanup.message; }
+    throw e;
+  }
+  return staged;
+}
+
+function commitFile(staged) {
+  if (snapshot(staged.path).content !== staged.content) throw new Error(`file changed during save: ${staged.path}`);
+  renameSync(staged.temp, staged.path);
+  staged.temp = null;
+}
+
+function discardStages(stages) {
+  const errors = [];
+  for (const staged of stages) {
+    if (!staged.temp) continue;
+    try { unlinkSync(staged.temp); } catch (e) { if (e.code !== "ENOENT") errors.push(`${staged.temp}: ${e.message}`); }
+  }
+  return errors;
+}
+
+function atomicTextWrite(path, content) {
+  const staged = stageFile(snapshot(path), content);
+  try { commitFile(staged); } catch (e) { e.cleanupErrors = discardStages([staged]); throw e; }
+}
+
+function serializeProvidersState(allProvConfig, activeProviderId) {
+  validateConfigs(allProvConfig, activeProviderId, null);
+  const entries = Object.entries(allProvConfig).sort(([a], [b]) =>
+    a === activeProviderId ? -1 : b === activeProviderId ? 1 : a.localeCompare(b));
+  return `providers:\n${entries.map(([id, cfg]) => {
+    const fields = ["model", "base_url", "name", "temperature", "max_tokens", "api_format"];
+    return `  ${id}:\n` + fields.filter(f => cfg[f] != null && cfg[f] !== "")
+      .map(f => `    ${f}: ${JSON.stringify(cfg[f])}`).join("\n");
+  }).join("\n")}\n`;
+}
+
+export function writeProvidersState(allProvConfig, activeProviderId) {
+  atomicTextWrite(`${P.varDir}/providers-state.yaml`, serializeProvidersState(allProvConfig, activeProviderId));
+}
+
+function modelPayload({ allProvConfig, providerId, fallbackIds }, oldIds) {
+  validateConfigs(allProvConfig, providerId, fallbackIds);
+  return {
+    providerId, fallbackIds: fallbackIds ?? null, oldIds,
+    providers: Object.entries(allProvConfig).map(([id, cfg]) => ({
+      id, ...Object.fromEntries(["model", "base_url", "temperature", "max_tokens", "api_format"]
+        .filter(k => cfg[k] != null).map(k => [k, cfg[k]])),
+      hermesId: Object.hasOwn(PROVIDER_HERMES_IDS, id) ? PROVIDER_HERMES_IDS[id] : id,
+      custom: !Object.hasOwn(PROVIDER_PRESETS, id) || PROVIDER_CLASSES[id] === "B",
+      envKey: id.startsWith("local-") ? "" : providerEnvKey(id),
+      apiMode: ["anthropic", "anthropic_messages"].includes(cfg.api_format || detectApiFormat(cfg.base_url, "").format)
+        ? "anthropic_messages" : "chat_completions",
+    })),
+  };
+}
+
+function runModelConfig(payload) {
+  if (!P.dataDir) throw new Error("dataDir is required");
+  const command = P.runtime ? P.runtime.command(["--home", resolve(P.dataDir)], { helper: "model-config" }) : {
+    executable: P.pythonBin || `${P.dataDir}/venv/bin/python`,
+    args: ["-B", fileURLToPath(new URL("./model-config.py", import.meta.url)), "--home", resolve(P.dataDir)],
+    env: { ...process.env, ...P.env, HERMES_HOME: resolve(P.dataDir), PYTHONDONTWRITEBYTECODE: "1", PYTHONIOENCODING: "utf-8" },
+  };
+  const child = spawnSync(command.executable, command.args, {
+    input: JSON.stringify(payload), encoding: "utf8", maxBuffer: 1024 * 1024, timeout: 30000,
+    env: command.env, cwd: command.cwd,
+  });
+  const uncertain = payload.action === "patch";
+  const transportError = message => Object.assign(new Error(message), {
+    status: 500, phase: "subprocess", committed: [],
+    configWriteUncertain: uncertain, envWriteUncertain: uncertain,
+  });
+  if (child.error) throw transportError(`model-config subprocess failed: ${child.error.code || "unknown"}`);
+  let result;
+  try { result = JSON.parse(child.stdout); } catch { throw transportError(`model-config.py failed (exit ${child.status}); no valid JSON response`); }
+  if (child.status !== 0 || !result.ok) {
+    const error = new Error(result.error || `model-config.py failed (exit ${child.status})`);
+    for (const key of ["status", "phase", "committed", "configWriteUncertain", "envWriteUncertain"]) {
+      if (Object.hasOwn(result, key)) error[key] = result[key];
+    }
+    throw error;
+  }
+  return result;
+}
+
+/** Real DATA/config.yaml + DATA/.env snapshot; no migration, defaults or VAR reads. */
+export function readModelConfiguration() {
+  return runModelConfig({ action: "snapshot" });
+}
+
+/** Resolve an explicit source/id against the real snapshot, never panel aliases or VAR state.
+ * A draft may override routing, but stored credentials must not follow an edited URL.
+ * An omitted key resolves from DATA; an explicit empty key tests without credentials.
+ */
+export function resolveModelTestProvider(input) {
+  const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
+  if (input != null && (typeof input !== "object" || Array.isArray(input))) fail("invalid provider");
+  const snapshot = readModelConfiguration();
+  let stored;
+  if (input == null) {
+    const active = snapshot.providers.filter(p => p.is_current);
+    if (active.length !== 1) fail("当前模型路由不唯一或未配置，请先选择服务", 409);
+    stored = active[0];
+  } else if (Object.hasOwn(input, "id")) {
+    if (typeof input.id !== "string" || typeof input.source !== "string") fail("provider id and source are required");
+    const matches = snapshot.providers.filter(p => p.id === input.id && p.source === input.source);
+    if (matches.length !== 1) fail("服务已变更或身份不唯一，请重新读取配置", 409);
+    stored = matches[0];
+  } else if (input.source && input.source !== "providers") fail("invalid draft source");
+  const draft = input || {};
+  const provider = { ...(stored || {}) };
+  for (const field of ["base_url", "api_mode", "model"]) {
+    if (Object.hasOwn(draft, field)) {
+      if (typeof draft[field] !== "string" || /[\r\n\0]/.test(draft[field])) fail(`invalid ${field}`);
+      provider[field] = draft[field];
+    }
+  }
+  let route;
+  try { route = new URL(provider.base_url); } catch { fail("此服务没有可用的模型列表地址，可使用配置列表或手动输入"); }
+  if (!["http:", "https:"].includes(route.protocol) || route.username || route.password || route.hash) fail("模型列表地址必须是无内嵌凭证的 HTTP(S) 地址");
+  if (stored?.extra_headers_configured || stored?.key_cmd_configured || (stored?.is_current &&
+      (snapshot.model.extra_headers_configured || snapshot.model.key_cmd_configured))) {
+    fail("此路由使用附加请求头或动态凭证，面板不执行这些认证方式；请使用配置列表或手动输入");
+  }
+  if (Object.hasOwn(draft, "api_key")) {
+    singleLine(draft.api_key, "api_key");
+    if (/[^\x21-\x7e]/.test(draft.api_key) || draft.api_key.includes("****") || draft.api_key.includes("${") || draft.api_key.startsWith("<redacted")) fail("不能使用掩码或无效凭证测试");
+    provider.api_key = draft.api_key;
+  } else {
+    if (stored && new URL(stored.base_url).href !== route.href) fail("地址已修改，请显式输入用于新地址的 API Key；不会转发原凭证");
+    provider.api_key = stored ? runModelConfig({ action: "resolve-key", id: stored.id, source: stored.source }).api_key || "" : "";
+    if (stored && readModelConfiguration().revision !== snapshot.revision) fail("读取凭证期间配置已变更，请重新读取后测试", 409);
+  }
+  if (stored?.auth_type && stored.auth_type !== "api_key" && !provider.api_key) fail("此服务使用交互式认证，面板不刷新认证；可使用官方内置目录或手动输入");
+  return provider;
+}
+
+/** Only explicit remote responses count as a successful discovery. No catalogue fallbacks. */
+export async function fetchGatewayModels(provider, userAgent = "Hermes-Panel") {
+  const started = Date.now();
+  try {
+    const base = new URL(provider.base_url);
+    if (!["http:", "https:"].includes(base.protocol) || base.username || base.password || base.search || base.hash) throw new Error("不支持此模型列表地址");
+    if (provider.api_mode && !["chat_completions", "codex_responses", "anthropic_messages"].includes(provider.api_mode)) throw new Error("此协议未提供面板可读取的模型列表，请使用配置列表或手动输入");
+    const anthropic = provider.api_mode === "anthropic_messages";
+    let pathname = base.pathname.replace(/\/+$/, "").replace(/\/(messages|chat\/completions|responses)$/, "");
+    if (anthropic && !pathname.endsWith("/v1")) pathname += "/v1";
+    base.pathname = pathname + "/models";
+    const headers = { Accept: "application/json", "User-Agent": userAgent };
+    if (anthropic) headers["anthropic-version"] = "2023-06-01";
+    if (provider.api_key) headers[anthropic ? "x-api-key" : "Authorization"] = anthropic ? provider.api_key : `Bearer ${provider.api_key}`;
+    // Never forward credentials through an upstream redirect or bypass the injected proxy.
+    if (typeof P.networkProxy?.fetch !== "function") throw new Error(NETWORK_PROXY_REQUIRED);
+    let response;
+    try {
+      response = await P.networkProxy.fetch(base, { method: "GET", headers, redirect: "error",
+        timeoutMs: 10000, signal: AbortSignal.timeout(10000) });
+    } catch { throw new Error(NETWORK_REQUEST_FAILED); }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json().catch(() => { throw new Error("远程响应不是模型列表"); });
+    const entries = data.data ?? data.models;
+    if (!Array.isArray(entries)) throw new Error("远程响应不是模型列表");
+    const ids = entries.map(m => typeof m === "string" ? m : m?.id || m?.name);
+    if (ids.some(id => typeof id !== "string" || !id.trim())) throw new Error("远程模型列表包含无效条目");
+    return { ok: true, source: "remote", models: [...new Set(ids)].map(id => ({ id, name: id })),
+      partial: data.has_more === true || !!data.next_page_token, latency: Date.now() - started };
+  } catch (error) {
+    return { ok: false, source: "remote", models: [], error: error.message, latency: Date.now() - started };
+  }
+}
+
+/** Precise optional-field patch. expectedRevision from GET is mandatory (409 on mismatch).
+ * providers: [{id, source?, changes?, api_key?}], removeProviderIds: [id],
+ * model: {provider?, default?, temperature?, max_tokens?, context_length?, reasoning_effort?},
+ * fallback_providers: complete raw object list. Omission preserves; api_key:"" clears.
+ * Success: {ok, revision, committed, configWriteUncertain, envWriteUncertain}.
+ * Errors carry status/phase/committed/uncertainty; never retry automatically or roll back.
+ */
+export function patchModelConfiguration(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw Object.assign(new TypeError("patch payload must be an object"), { status: 400, committed: [], configWriteUncertain: false, envWriteUncertain: false });
+  }
+  return runModelConfig({ ...payload, action: "patch" });
+}
+
+/** 同步执行，返回 {ok:true, committed}，或抛出带 phase/committed/cleanupErrors 的错误。
+ * 所有内容先准备好，再按 keys -> Hermes .env -> config -> state 的顺序发布。
+ * 每次替换是原子的，但整组不是：崩溃或靠后的错误可能让前面的文件已经提交。
+ * 绝不通过回滚去覆盖其他程序的写入。只提交了一部分时，会在错误的 phase/committed 中明确报告。
+ */
+export function saveModelConfiguration({ providers, allProvConfig, providerId, fallbackIds }) {
+  const committed = [], staged = [];
+  let phase = "validate";
+  try {
+    if (!P.dataDir || !P.varDir) throw new Error("dataDir and varDir are required");
+    validateConfigs(allProvConfig, providerId, fallbackIds);
+    validateKeyProviders(providers);
+    const ids = Object.keys(allProvConfig);
+    if (providers.length !== ids.length || providers.some(p => !Object.hasOwn(allProvConfig, p.id))) throw new TypeError("providers and allProvConfig must contain the same ids");
+    const oldIds = Object.keys(loadProvidersState());
+    const payload = modelPayload({ allProvConfig, providerId, fallbackIds }, oldIds);
+    const stateContent = serializeProvidersState(allProvConfig, providerId);
+    phase = "prepare";
+    const panel = snapshot(`${P.varDir}/.env.providers`), hermes = snapshot(`${P.dataDir}/.env`);
+    const state = snapshot(`${P.varDir}/providers-state.yaml`);
+    const panelContent = prepareProviderKeys(providers, panel.content || "", oldIds);
+    const hermesContent = prepareHermesKeys(ids, panelContent, hermes.content || "");
+    const plan = runModelConfig({ ...payload, action: "prepare" });
+    for (const [before, content] of [[panel, panelContent], [hermes, hermesContent], [state, stateContent]]) {
+      staged.push(stageFile(before, content));
+    }
+    for (const entry of staged.slice(0, 2)) {
+      phase = entry.path; commitFile(entry); committed.push(entry.path);
+    }
+    phase = "config.yaml";
+    runModelConfig({ ...payload, action: "commit", expectedRevision: plan.revision });
+    committed.push(`${P.dataDir}/config.yaml`);
+    phase = state.path; commitFile(staged[2]); committed.push(state.path);
+    return { ok: true, committed };
+  } catch (cause) {
+    const cleanupErrors = discardStages(staged);
+    const configWriteUncertain = phase === "config.yaml";
+    const error = new Error(`model configuration save failed at ${phase}: ${cause.message}; committed: ${committed.join(", ") || "none"}. Cross-file atomicity is not guaranteed.${configWriteUncertain ? " The config subprocess may have written before failing; inspect config.yaml before retrying." : ""}`, { cause });
+    Object.assign(error, { phase, committed, cleanupErrors, configWriteUncertain });
+    throw error;
+  }
 }
 
 // ─── config.yaml 的 model 段 + providers 段 + fallback 段构建与写入 ────────
 // 返回 { ok: true } 或 { ok: false, error }（写失败属致命，由调用方返回 500）。
 export function writeConfigYaml({ allProvConfig, providerId, fallbackIds }) {
-  const resolvedModel = allProvConfig[providerId]?.model || "auto";
-  const yamlPath = `${P.dataDir}/config.yaml`;
-
-  // ── 构建 providers: 段（A/B 分类，详见 provider-config.js 的 PROVIDER_CLASSES） ──
-  //   A 类内置服务商仅写 model 段，端点与原生协议交给 Hermes 内置 PROVIDER_REGISTRY；
-  //   B 类内置服务商（siliconflow / mistral / ollama-cloud）与所有非预设 custom-* 必须写 providers 段。
-  const customEntries = Object.entries(allProvConfig)
-    .sort(([a], [b]) => {
-      if (a === providerId) return -1;
-      if (b === providerId) return 1;
-      return a.localeCompare(b);
-    })
-    .filter(([id]) => !PROVIDER_PRESETS[id] || PROVIDER_CLASSES[id] === "B")
-    .map(([id, pcfg]) => {
-      const baseUrl = String(pcfg.base_url || "").trim();
-      if (!baseUrl) {
-        P.log(`跳过 provider "${id}"：缺少 base_url，未写入 config.yaml providers 段`);
-        return null;
-      }
-      // 本地模型（local-* 动态 id）：本地 OpenAI 兼容服务无需鉴权，
-      // 仅写 base_url + default_model，完全省略 api_key（Hermes config.py 支持缺省，
-      // runtime_provider.py 会自动兜底 "no-key-required" 占位）。
-      if (String(id).indexOf("local-") === 0) {
-        return `  ${id}:\n` +
-               `    base_url: ${yamlScalar(baseUrl)}\n` +
-               `    default_model: ${yamlScalar(pcfg.model || "auto")}`;
-      }
-      // env 名：B 类预设用 PROVIDER_API_KEYS[id]，custom-* 用 customEnvKey(id)
-      const envVar = PROVIDER_API_KEYS[id] || customEnvKey(id);
-      // API 格式：显式选择优先，未选时按 URL 启发式自动识别；
-      // Anthropic 形态追加 api_mode: anthropic_messages（网关运行时支持的字段），
-      // OpenAI 兼容形态维持现状不写 api_mode，保证存量配置行为不变。
-      const effFormat = pcfg.api_format || detectApiFormat(baseUrl, "").format;
-      const modeVal = apiModeForFormat(effFormat);
-      // 实机验证格式：base_url + api_key（${ENV} 插值）+ default_model
-      return `  ${id}:\n` +
-             `    base_url: ${yamlScalar(baseUrl)}\n` +
-             `    api_key: \${${envVar}}\n` +
-             `    default_model: ${yamlScalar(pcfg.model || "auto")}` +
-             (modeVal ? `\n    api_mode: ${modeVal}` : "");
-    })
-    .filter(Boolean);
-  const providersBlock = customEntries.length > 0 ? `providers:\n${customEntries.join("\n")}\n` : "";
-
   try {
-    let ymlContent = existsSync(yamlPath) ? readFileSync(yamlPath, "utf8") : "";
-    // model.provider 经 PROVIDER_HERMES_IDS 映射（openai → openai-api，其余用自身 id）
-    const hermesProvider = PROVIDER_HERMES_IDS[providerId] || providerId;
-    const newModel = `model:\n  provider: ${hermesProvider}\n  default: ${resolvedModel}\n`;
-    const modelRegex = /^model:[\t ]*\n(?:[\t ]+[^\n]*\n)*/m;
-    if (ymlContent.match(modelRegex)) {
-      ymlContent = ymlContent.replace(modelRegex, newModel);
-    } else {
-      ymlContent = newModel + "\n" + ymlContent;
-    }
-
-    // 同步 providers: 段——兼容模板里的 `providers: {}` 空映射与已存在的多行块两种形态，
-    // 避免产生重复的 providers 顶层键。无 B/custom 条目时整段省略 providers 节，
-    // A 类 active 且无自定义服务商时 config.yaml 只保留 model 段（贴合实机验证格式）。
-    const _NL = String.fromCharCode(10);
-    const _TAB = String.fromCharCode(9);
-    const _yl = ymlContent.split(_NL);
-    let _ps = -1;
-    for (let _i = 0; _i < _yl.length; _i++) {
-      if (_yl[_i].indexOf("providers:") === 0) { _ps = _i; break; }
-    }
-    if (_ps >= 0) {
-      let _pe = _ps + 1;
-      while (_pe < _yl.length && (_yl[_pe].startsWith(" ") || _yl[_pe].startsWith(_TAB))) _pe++;
-      const _before = _yl.slice(0, _ps).join(_NL);
-      const _after = _yl.slice(_pe).join(_NL);
-      if (providersBlock) {
-        ymlContent = (_before ? _before + _NL : "") + providersBlock + _after;
-      } else {
-        // 无 B/custom 条目：纯删除原 providers 段，仅拼接 _before + _after
-        ymlContent = _before + (_after ? _NL + _after : _NL);
-      }
-    } else if (providersBlock) {
-      // 将 providers 段插入 model 段正下方（而非追加到文件末尾）
-      const _modelBlockRe = /(^model:[\t ]*\n(?:[\t ]+[^\n]*\n)*)/m;
-      const _modelMatch = ymlContent.match(_modelBlockRe);
-      if (_modelMatch) {
-        const _insertPos = _modelMatch.index + _modelMatch[0].length;
-        ymlContent = ymlContent.slice(0, _insertPos) + providersBlock + ymlContent.slice(_insertPos);
-      } else {
-        // model 段也不存在时，退化为插到文件开头
-        ymlContent = providersBlock + ymlContent;
-      }
-    }
-
-    // 同步顶层 fallback_providers 段（外接模块处理：兼容 [] 单行与多行块两种形态，
-    // 内含写入自检，异常时保持原内容不变，防止写坏 config.yaml）
-    if (fallbackIds) {
-      ymlContent = applyFallbackToYaml(ymlContent, buildFallbackBlock(fallbackIds, allProvConfig));
-    }
-
-    writeFileSync(yamlPath, ymlContent);
+    const payload = modelPayload({ allProvConfig, providerId, fallbackIds }, Object.keys(loadProvidersState()));
+    const plan = runModelConfig({ ...payload, action: "prepare" });
+    runModelConfig({ ...payload, action: "commit", expectedRevision: plan.revision });
+    return { ok: true };
   } catch (e) {
     return { ok: false, error: "write config.yaml: " + e.message };
   }
-  return { ok: true };
 }
 
-// ─── 保存 API key 到控制面板专属 .env.providers（含旧格式一次性迁移） ─────
-export function saveProviderKeysToEnv(providers) {
-  const envUpdates = [];
-  (providers || []).forEach(p => {
-    if (!p.id) return;
-    // 本地模型（local-*）无需 API Key，跳过任何环境变量写入
-    if (String(p.id).indexOf("local-") === 0) return;
-    let envKey = PROVIDER_API_KEYS[p.id];
-    if (!envKey) {
-      envKey = customEnvKey(p.id);
+function validateKeyProviders(providers) {
+  if (!Array.isArray(providers)) throw new TypeError("providers must be an array");
+  const seen = new Set();
+  for (const p of providers) {
+    validateId(p?.id);
+    const envKey = providerEnvKey(p.id);
+    if (seen.has(envKey)) throw new TypeError("duplicate provider or environment variable");
+    seen.add(envKey);
+    for (const field of ["api_key", "_raw_api_key"]) {
+      if (p[field] != null) singleLine(p[field], field);
     }
-    let rawKey = null;
-    if (p._raw_api_key && !String(p._raw_api_key).startsWith('****')) {
-      rawKey = p._raw_api_key;
-    } else if (p.api_key && !String(p.api_key).startsWith('****') && p.api_key !== 'none') {
-      rawKey = p.api_key;
-    }
-    if (rawKey && rawKey.length > 0) {
-      envUpdates.push({ key: envKey, value: rawKey });
-    }
-  });
-  if (envUpdates.length > 0) {
-    try {
-      const envProvPath = `${P.varDir}/.env.providers`;
-      let envContent = existsSync(envProvPath) ? readFileSync(envProvPath, "utf8") : "";
-      envUpdates.forEach(({ key, value }) => {
-        const envRegex = new RegExp(`^${key}=.*$`, "m");
-        if (envRegex.test(envContent)) {
-          envContent = envContent.replace(envRegex, `${key}=${value}`);
-        } else {
-          envContent += `${key}=${value}\n`;
-        }
-      });
-      writeFileSync(envProvPath, envContent);
-    } catch (e) {}
   }
-
-  // ── 一次性迁移 .env.providers 旧格式 CUSTOM_PROVIDER_* → CUSTOM_* ──
-  try {
-    const _migPath = `${P.varDir}/.env.providers`;
-    if (existsSync(_migPath)) {
-      let _migContent = readFileSync(_migPath, "utf8");
-      const _migRe = /^CUSTOM_PROVIDER_([A-Z0-9_]+_API_KEY)=(.+)$/gm;
-      let _migM;
-      let _migDirty = false;
-      while ((_migM = _migRe.exec(_migContent)) !== null) {
-        const _nk = `CUSTOM_${_migM[1]}`;
-        if (!new RegExp(`^${_nk}=`, "m").test(_migContent)) {
-          _migContent += `${_nk}=${_migM[2]}\n`;
-        }
-        _migDirty = true;
-      }
-      if (_migDirty) {
-        _migContent = _migContent.split("\n").filter(l => !/^CUSTOM_PROVIDER_[A-Z0-9_]+_API_KEY=/.test(l)).join("\n");
-        writeFileSync(_migPath, _migContent);
-      }
-    }
-  } catch {}
 }
 
-// ─── 设为默认时，同步 active provider 的 key 到 Hermes .env（非致命） ─────
-export function syncActiveKeyToHermesEnv(providerId) {
-  try {
-    const hermesEnvPath = `${P.dataDir}/.env`;
-    let hermesEnv = existsSync(hermesEnvPath) ? readFileSync(hermesEnvPath, "utf8") : "";
-    // 从已有的 .env.providers 中找到 active provider 的 key
-    Object.keys(PROVIDER_API_KEYS).forEach(id => {
-      if (id !== providerId) return;
-      const envKey = PROVIDER_API_KEYS[id];
-      // 从 .env.providers 读取真实 key
-      const envProvPath = `${P.varDir}/.env.providers`;
-      if (existsSync(envProvPath)) {
-        const provEnv = readFileSync(envProvPath, "utf8");
-        const m = provEnv.match(new RegExp(`^${envKey}=(.*)$`, "m"));
-        if (m && m[1].length > 0) {
-          const hermesRegex = new RegExp(`^${envKey}=.*$`, "m");
-          if (hermesRegex.test(hermesEnv)) {
-            hermesEnv = hermesEnv.replace(hermesRegex, `${envKey}=${m[1]}`);
-          } else {
-            hermesEnv += `\n${envKey}=${m[1]}\n`;
-          }
-        }
-      }
-    });
-    // 同时检查自定义 provider
-    const _cKey = customEnvKey(providerId);
-    if (!PROVIDER_API_KEYS[providerId]) {
-      const envProvPath2 = `${P.varDir}/.env.providers`;
-      if (existsSync(envProvPath2)) {
-        const provEnv2 = readFileSync(envProvPath2, "utf8");
-        let m2 = provEnv2.match(new RegExp(`^${_cKey}=(.*)$`, "m"));
-        // 兼容旧名
-        if (!m2) m2 = provEnv2.match(new RegExp(`^${legacyCustomEnvKey(providerId)}=(.*)$`, "m"));
-        if (m2 && m2[1].length > 0) {
-          const hermesRegex2 = new RegExp(`^${_cKey}=.*$`, "m");
-          if (hermesRegex2.test(hermesEnv)) {
-            hermesEnv = hermesEnv.replace(hermesRegex2, `${_cKey}=${m2[1]}`);
-          } else {
-            hermesEnv += `\n${_cKey}=${m2[1]}\n`;
-          }
-        }
-      }
+function envLineRegex(key, flags = "m") {
+  if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new TypeError("invalid environment variable");
+  return new RegExp(`^(?:export[ \t]+)?${key}[ \t]*=[^\r\n]*`, flags);
+}
+
+function envValue(content, key) {
+  const matches = [...content.matchAll(envLineRegex(key, "gm"))];
+  if (!matches.length) return null;
+  const value = matches.at(-1)[0].slice(matches.at(-1)[0].indexOf("=") + 1);
+  singleLine(value, "stored API key");
+  // 不静默截断多行 dotenv 值（无论合法还是畸形）。
+  const trimmed = value.trim();
+  if ((trimmed.startsWith('"') || trimmed.startsWith("'")) &&
+      (trimmed.length < 2 || !trimmed.endsWith(trimmed[0]))) throw new Error(`multiline or unterminated key: ${key}`);
+  return value;
+}
+
+function finalNewline(content) {
+  return content && !content.endsWith("\n") ? content + "\n" : content;
+}
+
+function putEnv(content, key, value) {
+  singleLine(value, "API key");
+  const re = envLineRegex(key, "gm");
+  if (re.test(content)) return finalNewline(content.replace(re, () => `${key}=${value}`));
+  return finalNewline(content) + `${key}=${value}\n`;
+}
+
+function removeEnv(content, key) {
+  const re = envLineRegex(key);
+  return content.split(/\r?\n/).filter(line => !re.test(line)).join("\n");
+}
+
+function prepareProviderKeys(providers, content, oldIds = []) {
+  validateKeyProviders(providers);
+  for (const p of providers) {
+    if (p.id.startsWith("local-")) continue;
+    const key = providerEnvKey(p.id);
+    const raw = [p._raw_api_key, p.api_key].find(v => v && v !== "none" && !v.startsWith("****"));
+    if (raw) content = putEnv(content, key, raw);
+    if (!Object.hasOwn(PROVIDER_API_KEYS, p.id)) {
+      const legacy = legacyCustomEnvKey(p.id);
+      const oldValue = envValue(content, legacy);
+      if (!envValue(content, key) && oldValue) content = putEnv(content, key, oldValue);
+      content = removeEnv(content, legacy);
     }
-    // 清理 Hermes .env 中旧格式 CUSTOM_PROVIDER_* 行
-    hermesEnv = hermesEnv.split("\n").filter(l => !/^CUSTOM_PROVIDER_[A-Z0-9_]+_API_KEY=/.test(l)).join("\n");
-    writeFileSync(hermesEnvPath, hermesEnv);
-  } catch (e) {}
+  }
+  const keep = new Set(providers.map(p => providerEnvKey(p.id)));
+  for (const id of oldIds) {
+    const key = providerEnvKey(id);
+    if (!keep.has(key)) {
+      content = removeEnv(content, key);
+      if (!Object.hasOwn(PROVIDER_API_KEYS, id)) content = removeEnv(content, legacyCustomEnvKey(id));
+    }
+  }
+  return finalNewline(content);
+}
+
+function prepareHermesKeys(ids, panelContent, content) {
+  for (const id of ids) {
+    validateId(id);
+    if (id.startsWith("local-")) continue;
+    const key = providerEnvKey(id);
+    const legacy = Object.hasOwn(PROVIDER_API_KEYS, id) ? null : legacyCustomEnvKey(id);
+    const value = envValue(panelContent, key) || (legacy && envValue(panelContent, legacy)) ||
+      envValue(content, key) || (legacy && envValue(content, legacy));
+    if (value && !value.trim().startsWith("****")) content = putEnv(content, key, value);
+    // 只迁移已配置的服务商，其他凭证不归面板管理。
+    if (legacy && value) content = removeEnv(content, legacy);
+  }
+  return finalNewline(content);
+}
+
+export function saveProviderKeysToEnv(providers) {
+  const path = `${P.varDir}/.env.providers`;
+  const before = snapshot(path);
+  const content = prepareProviderKeys(providers, before.content || "");
+  if (content !== (before.content || "")) atomicTextWrite(path, content);
+}
+
+export function syncActiveKeyToHermesEnv(providerId) {
+  validateId(providerId);
+  const path = `${P.dataDir}/.env`;
+  const before = snapshot(path);
+  const panel = snapshot(`${P.varDir}/.env.providers`);
+  const content = prepareHermesKeys([providerId], panel.content || "", before.content || "");
+  if (content !== (before.content || "")) atomicTextWrite(path, content);
 }
 
 // ─── bridge 对话主模型解析 ─────────────────────────────────────
 // 将面板 active provider 解析为 bridge chat 请求的 {model, provider} 字段：
 // provider 经 PROVIDER_HERMES_IDS 映射，与 writeConfigYaml 写 config.yaml model 段
-// 同源（即与网关/微信链路一致）；base_url/api_key 由 hermes 侧 runtime_provider
+// 同源（即与网关/微信链路一致），base_url/api_key 由 hermes 侧 runtime_provider
 // 自行从 config.yaml providers 段 + .env 解析，无需随请求传递。
 // LOCAL/hermes（本地引擎默认）或解析失败返回 null，调用方不传字段，
 // bridge 回落 config.yaml 默认模型（现状行为）。
@@ -371,29 +538,12 @@ export function resolveBridgePrimary(provider) {
   } catch { return null; }
 }
 
-// ─── 删除已移除 provider 的 .env.providers key（非致命） ──────────────────
+// 只删除旧面板 state 拥有的 key，无关的工具凭证保留。
 export function cleanupRemovedProviderKeys(providers) {
-  try {
-    const envProvPath = `${P.varDir}/.env.providers`;
-    if (existsSync(envProvPath)) {
-      const envContent = readFileSync(envProvPath, "utf8");
-      const keepKeys = new Set();
-      (providers || []).forEach(p => {
-        if (!p.id) return;
-        const k = PROVIDER_API_KEYS[p.id] || customEnvKey(p.id);
-        keepKeys.add(k);
-      });
-      const lines = envContent.split("\n");
-      const filtered = lines.filter(line => {
-        const m = line.match(/^([A-Z_][A-Z0-9_]*API_KEY|.+_API_KEY)=/);
-        if (!m) return true;
-        return keepKeys.has(m[1]);
-      });
-      if (filtered.join("\n") !== envContent) {
-        writeFileSync(envProvPath, filtered.join("\n"));
-      }
-    }
-  } catch (e) {}
+  const path = `${P.varDir}/.env.providers`;
+  const before = snapshot(path);
+  const content = prepareProviderKeys(providers, before.content || "", Object.keys(loadProvidersState()));
+  if (content !== (before.content || "")) atomicTextWrite(path, content);
 }
 
 // ============================================================================
@@ -525,9 +675,9 @@ export const PROVIDER_API_KEYS = {
 };
 
 // ── A/B 分类 ─────────────────────────────────────
-// A 类：仅写 model 段，端点与原生协议交给 Hermes 内置 PROVIDER_REGISTRY 处理；
+// A 类：仅写 model 段，端点与原生协议交给 Hermes 内置 PROVIDER_REGISTRY 处理，
 // B 类：必须写 providers 段（base_url + api_key + default_model）。
-// 注：动态 id 约定 —— custom-*（第三方自定义服务商，写 providers 段含 api_key）、
+// 注：动态 id 约定如下。custom-*（第三方自定义服务商，写 providers 段含 api_key）、
 //     local-*（本地 OpenAI 兼容端点，写 providers 段仅 base_url + default_model，省略 api_key），
 //     二者均不在此表中，按"非预设"走 providers 段逻辑（详见 monitor.js customEntries）。
 export const PROVIDER_CLASSES = {
@@ -545,7 +695,7 @@ export const PROVIDER_CLASSES = {
 };
 
 // ── provider id → Hermes 内部 provider id 映射 ───────────────────────
-// 仅列出与自身 id 不同的项；未列出者默认使用自身 id。
+// 仅列出与自身 id 不同的项。未列出者默认使用自身 id。
 export const PROVIDER_HERMES_IDS = {
   "openai": "openai-api",
 };
@@ -580,7 +730,7 @@ export function yamlScalar(val) {
 // SECTION 4: API FORMAT DETECTION（来自 api-format.js）
 // ============================================================================
 
-// 从 base_url 提取主机名（小写）；解析失败返回空串
+// 从 base_url 提取主机名（小写），解析失败返回空串
 function hostnameOf(baseUrl) {
   try {
     return new URL(String(baseUrl || "").trim()).hostname.toLowerCase();
@@ -589,7 +739,7 @@ function hostnameOf(baseUrl) {
   }
 }
 
-// 从 base_url 提取路径（小写、去尾斜杠）；解析失败返回空串
+// 从 base_url 提取路径（小写、去尾斜杠），解析失败返回空串
 function pathOf(baseUrl) {
   try {
     return new URL(String(baseUrl || "").trim()).pathname.toLowerCase().replace(/\/+$/, "");
@@ -626,18 +776,20 @@ export function detectApiFormat(baseUrl, apiKey) {
 }
 
 // ── 在线探测（可选增强，由面板“检测”按钮触发）────────────────────────────
-// 先 GET {base}/models 判 OpenAI 兼容，失败再 POST {base}/messages 判 Anthropic；
+// 先 GET {base}/models 判 OpenAI 兼容，失败再 POST {base}/messages 判 Anthropic，
 // 每步 5s 超时。由后端代理发起，规避前端跨域限制。
 export async function probeApiFormat(baseUrl, apiKey, timeoutMs = 5000) {
   const base = String(baseUrl || "").trim().replace(/\/+$/, "");
   if (!/^https?:\/\//i.test(base)) {
     return { ok: false, error: "base_url 必须以 http(s):// 开头" };
   }
+  if (typeof P.networkProxy?.fetch !== "function") return { ok: false, error: NETWORK_PROXY_REQUIRED };
   const key = String(apiKey || "").trim();
   // 第一步：OpenAI 兼容端点惯例暴露 GET /models（base 通常已含 /v1）
   try {
     const headers = key ? { "Authorization": `Bearer ${key}` } : {};
-    const r = await fetch(`${base}/models`, { headers, signal: AbortSignal.timeout(timeoutMs) });
+    const r = await P.networkProxy.fetch(`${base}/models`, { method: "GET", headers, redirect: "error",
+      timeoutMs, signal: AbortSignal.timeout(timeoutMs) });
     if (r.ok) {
       const j = await r.json().catch(() => null);
       if (j && (Array.isArray(j.data) || Array.isArray(j.models))) {
@@ -645,12 +797,12 @@ export async function probeApiFormat(baseUrl, apiKey, timeoutMs = 5000) {
       }
     }
   } catch { /* 超时/网络错误：继续下一种探测 */ }
-  // 第二步：Anthropic Messages 端点——无论成功还是鉴权失败，
+  // 第二步：Anthropic Messages 端点。无论成功还是鉴权失败，
   // 响应体都携带 type 字段（"message" 或 "error"），以此识别协议
   try {
     const headers = { "Content-Type": "application/json", "anthropic-version": "2023-06-01" };
     if (key) headers["x-api-key"] = key;
-    const r2 = await fetch(`${base}/messages`, {
+    const r2 = await P.networkProxy.fetch(`${base}/messages`, {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -658,6 +810,8 @@ export async function probeApiFormat(baseUrl, apiKey, timeoutMs = 5000) {
         max_tokens: 1,
         messages: [{ role: "user", content: "ping" }],
       }),
+      redirect: "error",
+      timeoutMs,
       signal: AbortSignal.timeout(timeoutMs),
     });
     const j2 = await r2.json().catch(() => null);
@@ -669,7 +823,7 @@ export async function probeApiFormat(baseUrl, apiKey, timeoutMs = 5000) {
 }
 
 // ── config.yaml providers 条目的格式化辅助 ─────────────────────────────
-// 显式声明为 anthropic 时返回网关认识的 api_mode 值；OpenAI 兼容维持缺省（返回空串，不写字段）
+// 显式声明为 anthropic 时返回网关认识的 api_mode 值。OpenAI 兼容维持缺省（返回空串，不写字段）
 export function apiModeForFormat(format) {
   return format === "anthropic" ? "anthropic_messages" : "";
 }
@@ -677,6 +831,8 @@ export function apiModeForFormat(format) {
 // 规范化面板传入的 api_format 值：仅接受 openai / anthropic，其余视为未指定（自动识别）
 export function normalizeApiFormat(value) {
   const v = String(value || "").trim().toLowerCase();
+  if (v === "anthropic_messages") return "anthropic";
+  if (v === "chat_completions") return "openai";
   return (v === "openai" || v === "anthropic") ? v : "";
 }
 
@@ -700,7 +856,7 @@ export function normalizeApiFormat(value) {
 //    数量不定，不逐一收录，由 toolDisplayName 前缀规则兜底
 //
 // 维护说明：Hermes 官方升级新增/改名工具时，只需在下方 TOOL_NAME_ZH / TOOL_EMOJI
-// 各加一行（key 为工具英文名，译名保持简短动宾式，如“执行代码”）；未收录的工具名
+// 各加一行（key 为工具英文名，译名保持简短动宾式，如“执行代码”），未收录的工具名
 // 会自动回退显示英文原名，不影响使用。
 
 // 工具英文名 → 中文显示名
@@ -924,7 +1080,7 @@ export const TOOL_EMOJI = {
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 
-// 取工具中文显示名；未命中兜底：mcp__server__tool 新格式 → "MCP·<tool>"（取末段工具名），
+// 取工具中文显示名，未命中兜底：mcp__server__tool 新格式 → "MCP·<tool>"（取末段工具名），
 // mcp_ 旧格式 → "MCP·原名"，其余显示英文原名，空值显示“工具调用”，
 // 保证任何情况下不出现 undefined/空白徽章
 export function toolDisplayName(tool) {
@@ -953,14 +1109,14 @@ export function toolEmoji(tool) {
 // ============================================================================
 
 // 可直接作为网关内置回退服务商的面板 provider id 白名单：
-// 这些 id 网关原生认识，条目直接写 provider: <hermes_id> + model；
+// 这些 id 网关原生认识，条目直接写 provider: <hermes_id> + model，
 // 其余（B 类 / custom-* / 不在名单的 A 类 / local-*）一律降级为 custom 形态
 // （provider: custom + model + base_url + key_env），保守策略保证条目可用。
 const FALLBACK_NATIVE_IDS = new Set([
   "zai", "kimi-coding", "kimi-coding-cn", "minimax", "minimax-cn", "openrouter",
 ]);
 
-// 回退服务商环境变量名：内置服务商查 PROVIDER_API_KEYS，非内置走 custom 规则；local-* 无鉴权返回空
+// 回退服务商环境变量名：内置服务商查 PROVIDER_API_KEYS，非内置走 custom 规则，local-* 无鉴权返回空
 function fallbackEnvKey(id) {
   if (String(id).indexOf("local-") === 0) return "";
   return PROVIDER_API_KEYS[id] || customEnvKey(id);
@@ -968,28 +1124,27 @@ function fallbackEnvKey(id) {
 
 // ── 解析 config.yaml 顶层 fallback_providers 块 → 面板 provider id 数组 ─────
 // 兼容两种形态：单行空列表 `fallback_providers: []` 与多行列表块。
-// 面板 id 优先取写入时附带的 `# panel:<id>` 注释；无注释时若 provider 值
+// 面板 id 优先取写入时附带的 `# panel:<id>` 注释，无注释时若 provider 值
 // 恰好是白名单内置服务商 id 则直接采用，否则该条目无法反查、跳过。
 export function parseFallback(yamlContent) {
-  const lines = String(yamlContent || "").split("\n");
+  const lines = String(yamlContent || "").split(/\r?\n/);
   const ids = [];
   for (let i = 0; i < lines.length; i++) {
     if (!/^fallback_providers:/.test(lines[i])) continue;
     // 单行形态：fallback_providers: []（含尾随空白/注释）
     if (/^fallback_providers:\s*\[\s*\]\s*(#.*)?$/.test(lines[i])) return [];
-    // 多行块形态：吃掉后续缩进行与顶格 "- " 列表项行
+    // 多行块形态：连同后续缩进行与顶格 "- " 列表项行一起取出
     for (let j = i + 1; j < lines.length; j++) {
       const ln = lines[j];
       if (!(/^[ \t]/.test(ln) || /^- /.test(ln))) break;
+      const provM = ln.match(/^[-\s]*provider:\s*["']?([A-Za-z0-9_-]+)["']?\s*(?:#.*)?$/);
+      if (provM && !["custom", "auto"].includes(provM[1])) {
+        const id = provM[1] === "openai-api" ? "openai" : provM[1];
+        if (!ids.includes(id)) ids.push(id);
+        continue; // 命名路由优先于 ruamel 保留下来的过期注释。
+      }
       const pm = ln.match(/#\s*panel:([A-Za-z0-9_-]+)/);
-      if (pm) {
-        if (ids.indexOf(pm[1]) === -1) ids.push(pm[1]);
-        continue;
-      }
-      const provM = ln.match(/^[-\s]*provider:\s*([A-Za-z0-9._-]+)\s*$/);
-      if (provM && FALLBACK_NATIVE_IDS.has(provM[1]) && ids.indexOf(provM[1]) === -1) {
-        ids.push(provM[1]);
-      }
+      if (pm && !ids.includes(pm[1])) ids.push(pm[1]);
     }
     break;
   }
@@ -997,7 +1152,7 @@ export function parseFallback(yamlContent) {
 }
 
 // ── 生成 fallback_providers YAML 块 ────────────────────────────────────────
-// entries: 面板 provider id 数组（首期单选，调用方已截断为最多 1 项）；
+// entries: 面板 provider id 数组（首期单选，调用方已截断为最多 1 项），
 // provState: { <id>: { model, base_url, ... } }（monitor.js 的 allProvConfig 形态）。
 // 每个条目末尾附 `# panel:<id>` 注释供 parseFallback 回读反查。
 export function buildFallbackBlock(entries, provState) {
@@ -1026,9 +1181,9 @@ export function buildFallbackBlock(entries, provState) {
 }
 
 // ── 把 fallback_providers 块替换 / 插入到 config.yaml 文本 ─────────────────
-// 手法与 monitor.js providers 段一致：定位顶层键 → 吃掉块内行 → 整块替换；
+// 手法与 monitor.js providers 段一致：定位顶层键 → 取出块内各行 → 整块替换，
 // 键不存在时插到 model / providers 段之后。写入前后做正则自检，异常时
-// 原样返回旧内容，绝不写坏 config.yaml。
+// 原样返回旧内容，绝不写出格式损坏的 config.yaml。
 export function applyFallbackToYaml(ymlContent, block) {
   const src = String(ymlContent == null ? "" : ymlContent);
   const blk = String(block || "fallback_providers: []\n");
@@ -1039,7 +1194,7 @@ export function applyFallbackToYaml(ymlContent, block) {
   }
   let out;
   if (start >= 0) {
-    // 吃掉块内行：缩进行 + 顶格 "- " 列表项行（兼容 [] 单行形态——此时块内行数为 0）
+    // 取出块内各行：缩进行 + 顶格 "- " 列表项行（兼容 [] 单行形态，此时块内行数为 0）
     let end = start + 1;
     while (end < lines.length && (/^[ \t]/.test(lines[end]) || /^- /.test(lines[end]))) end++;
     const before = lines.slice(0, start).join("\n");
@@ -1068,37 +1223,14 @@ export function applyFallbackToYaml(ymlContent, block) {
 }
 
 // ── 同步回退服务商 API key 到网关 .env ────────────────────────────────────────
-// 现有逻辑只同步 active provider 的 key；回退触发时网关按环境变量取回退服务商 key，
+// 现有逻辑只同步 active provider 的 key。回退触发时网关按环境变量取回退服务商 key，
 // 缺失会导致 401，故保存回退配置时必须把回退服务商 key 一并写入 hermesEnvPath。
 export function syncFallbackKeysToHermesEnv(fallbackIds, envProvidersPath, hermesEnvPath) {
-  const ids = (fallbackIds || []).filter((id) => String(id).indexOf("local-") !== 0);
-  if (ids.length === 0) return false;
-  if (!existsSync(envProvidersPath)) return false;
-  const provEnv = readFileSync(envProvidersPath, "utf8");
-  let hermesEnv = existsSync(hermesEnvPath) ? readFileSync(hermesEnvPath, "utf8") : "";
-  let dirty = false;
-  ids.forEach((id) => {
-    const envKey = fallbackEnvKey(id);
-    if (!envKey) return;
-    let m = provEnv.match(new RegExp(`^${envKey}=(.*)$`, "m"));
-    // 非内置服务商兜底读取旧格式变量名
-    if (!m && !PROVIDER_API_KEYS[id]) {
-      m = provEnv.match(new RegExp(`^${legacyCustomEnvKey(id)}=(.*)$`, "m"));
-    }
-    if (!m || m[1].length === 0) return;
-    const lineRe = new RegExp(`^${envKey}=.*$`, "m");
-    const newLine = `${envKey}=${m[1]}`;
-    if (lineRe.test(hermesEnv)) {
-      if (hermesEnv.match(lineRe)[0] !== newLine) {
-        hermesEnv = hermesEnv.replace(lineRe, newLine);
-        dirty = true;
-      }
-    } else {
-      hermesEnv += (hermesEnv.endsWith("\n") || hermesEnv === "" ? "" : "\n") + newLine + "\n";
-      dirty = true;
-    }
-  });
-  if (dirty) writeFileSync(hermesEnvPath, hermesEnv);
+  const before = snapshot(hermesEnvPath);
+  const panel = snapshot(envProvidersPath);
+  const content = prepareHermesKeys(fallbackIds || [], panel.content || "", before.content || "");
+  const dirty = content !== (before.content || "");
+  if (dirty) atomicTextWrite(hermesEnvPath, content);
   return dirty;
 }
 
@@ -1107,11 +1239,10 @@ export function syncFallbackKeysToHermesEnv(fallbackIds, envProvidersPath, herme
 // ============================================================================
 
 // 聊天加固模块（增量 checkpoint / finalize / resume）
-// 移植自 veenyi-fnos-hermes-agent 项目
-// ESM，与项目 monitor.js 一致。无外部依赖。
+// ESM，与 monitor.js 一致。无外部依赖。
 //
 // 设计意图：流式回复期间周期性持久化半成品（带 _streaming 标记），
-// 正常完成或出错时转正，避免断电/崩溃丢内容。
+// 正常完成或出错时转为正式消息，避免断电/崩溃丢内容。
 // 与多会话 liveRuns 运行表互不干扰（各管各的关切）。
 
 const CHECKPOINT_INTERVAL_MS = 1000;   // 定时器检查周期
@@ -1123,7 +1254,7 @@ const DEDUP_WINDOW_MS = 60000;         // WS→XHR 回退去重窗口（与 moni
  * 创建流式 checkpoint 工厂。
  *
  * @param {string} sessionId — 会话 ID（仅用于日志）
- * @param {object} session  — 调用方已加载的 in-memory session 对象引用；
+ * @param {object} session  — 调用方已加载的 in-memory session 对象引用，
  *   checkpoint 和 finalize 直接操作其 messages 数组然后调 saveSession。
  * @param {{ saveSession: (s: any) => void, log?: (msg: string) => void }} deps
  * @returns {{ onDelta: (text: string) => void, getReply: () => string,
@@ -1176,10 +1307,10 @@ export function createCheckpointer(sessionId, session, { saveSession, log }) {
     getReply() { return fullReply; },
 
     /**
-     * 流结束时转正 _streaming 消息（移除标记）。
+     * 流结束时把 _streaming 消息转为正式消息（移除标记）。
      * 若尚无 _streaming 消息则追加正式消息。
      *
-     * @param {string} [content] — 最终内容；缺省时用 checkpointer 累积文本
+     * @param {string} [content] — 最终内容。缺省时用 checkpointer 累积文本
      */
     finalize(content) {
       if (disposed) return;
@@ -1187,7 +1318,7 @@ export function createCheckpointer(sessionId, session, { saveSession, log }) {
       if (timer) { clearInterval(timer); timer = null; }
       const finalContent = (content != null && content !== "") ? String(content) : fullReply;
       if (!finalContent) {
-        // 没有任何内容：若之前有 _streaming 消息也转正（保留 checkpoint 内容）
+        // 没有任何内容：若之前有 _streaming 消息也转为正式消息（保留 checkpoint 内容）
         const last = session.messages[session.messages.length - 1];
         if (last && last.role === "assistant" && last._streaming) {
           delete last._streaming;
@@ -1216,7 +1347,7 @@ export function createCheckpointer(sessionId, session, { saveSession, log }) {
       }
     },
 
-    /** 仅释放定时器，不做持久化（异常出口用；先前 checkpoint 保留给 resume 处理） */
+    /** 仅释放定时器，不做持久化（异常出口用，先前 checkpoint 保留给 resume 处理） */
     dispose() {
       disposed = true;
       if (timer) { clearInterval(timer); timer = null; }
@@ -1225,8 +1356,8 @@ export function createCheckpointer(sessionId, session, { saveSession, log }) {
 }
 
 /**
- * 会话 resume：把残留的 _streaming 消息转正（去掉标记，保留内容）。
- * 适用于加载/切换会话时调用——覆盖上次崩溃/断电留下的半成品状态。
+ * 会话 resume：把残留的 _streaming 消息转为正式消息（去掉标记，保留内容）。
+ * 适用于加载/切换会话时调用，用来覆盖上次崩溃/断电留下的半成品状态。
  *
  * @param {object} session — 完整 session 对象
  * @param {(s: any) => void} saveSession

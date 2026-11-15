@@ -1,15 +1,40 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-HERMES_VENV_BIN="${TRIM_PKGHOME:-/var/apps/hermes-agent/home}/data/venv/bin/hermes"
-
-if [ ! -x "$HERMES_VENV_BIN" ]; then
-    echo "hermes-agent not installed in venv. Please reinstall the app." >&2
-    exit 1
+fail() { printf '%s\n' "hermes: $*" >&2; exit 1; }
+APP_DIR="${APP_DIR:-${TRIM_APPDEST:-}}"
+if [[ -z "$APP_DIR" ]]; then
+    # The fnOS command resource can be a symlink outside APP/bin.
+    ENTRY="$(readlink -f -- "${BASH_SOURCE[0]}")"
+    APP_DIR="$(cd -- "$(dirname -- "$ENTRY")/.." && pwd -P)"
 fi
+DATA_DIR="${DATA_DIR:-${TRIM_PKGHOME:+${TRIM_PKGHOME}/data}}"
+VAR_DIR="${VAR_DIR:-${TRIM_PKGVAR:-}}"
+if [[ -z "$DATA_DIR" || -z "$VAR_DIR" ]]; then
+    # usr-local-linker installs a symlink, not a lifecycle environment wrapper.
+    # fnos-dev-api documents these volume-independent fnOS directory aliases.
+    # Only use them for this installed application, never for an unrelated copy.
+    PLATFORM_DIR=/var/apps/hermes-agent
+    [[ "$APP_DIR" == /* && -d "$APP_DIR" && "$APP_DIR" -ef "$PLATFORM_DIR/target" ]] ||
+        fail "Explicit DATA_DIR/VAR_DIR required outside the installed fnOS application"
+    if [[ -z "$DATA_DIR" ]]; then
+        DATA_DIR="$(readlink -e -- "$PLATFORM_DIR/home/data")" || fail "Installed application data directory unavailable"
+    fi
+    if [[ -z "$VAR_DIR" ]]; then
+        VAR_DIR="$(readlink -e -- "$PLATFORM_DIR/var")" || fail "Installed application state directory unavailable"
+    fi
+fi
+for NAME in APP_DIR DATA_DIR VAR_DIR; do
+    VALUE="${!NAME}"
+    [[ "$VALUE" == /* && "$VALUE" != / ]] || fail "Explicit absolute $NAME is required"
+done
+export APP_DIR DATA_DIR VAR_DIR
 
-export PATH="${TRIM_PKGHOME:-/var/apps/hermes-agent/home}/data/venv/bin:$PATH"
-export HOME="${TRIM_PKGHOME:-/var/apps/hermes-agent/home}/data"
-export HERMES_HOME="${HOME}"
-
-exec "$HERMES_VENV_BIN" "$@"
+# Same persistent runtime installed for server/boot.js; never use PATH's Node.
+NODE_BIN="$DATA_DIR/node/bin/node"
+[[ -f "$NODE_BIN" && -x "$NODE_BIN" ]] || fail "Application Node runtime unavailable: $NODE_BIN"
+case "$(uname -m)" in x86_64) PRIVATE_LIB_ARCH=x64 ;; aarch64|arm64) PRIVATE_LIB_ARCH=arm64 ;; *) PRIVATE_LIB_ARCH="" ;; esac
+if [[ -n "$PRIVATE_LIB_ARCH" && -f "$APP_DIR/lib/$PRIVATE_LIB_ARCH/libatomic.so.1" && ! -L "$APP_DIR/lib/$PRIVATE_LIB_ARCH/libatomic.so.1" ]]; then
+    export LD_LIBRARY_PATH="$APP_DIR/lib/$PRIVATE_LIB_ARCH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+exec "$NODE_BIN" "$APP_DIR/server/kernel-cli.js" "$@"

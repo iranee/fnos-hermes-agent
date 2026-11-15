@@ -1,9 +1,347 @@
 #!/bin/bash
+# BEGIN shared hook logging：以下公共日志块在六个钩子中保持一致。
+HOOK_LOG_FILE=/tmp/install_hermes_agent.log
+HOOK_NAME="${0##*/}"
+HOOK_STAGE=logging
+HOOK_LOG_READY=0
+exec {HOOK_ORIGINAL_STDERR}>&2
 
-"${TRIM_APPDEST}/cmd/main" stop 2>/dev/null || true
+hook_append_toast() {
+    local file="${TRIM_TEMP_LOGFILE:-}"
+    [[ -n "$file" ]] || return 0
+    if [[ -L "$file" || ( -e "$file" && ! -f "$file" ) ]]; then
+        printf 'ERROR: refusing non-regular fnOS toast file: %s\n' "$file" >&2
+        return 0
+    fi
+    # 只追加，不覆盖 fnOS 或 helper 已写入的更具体提示。
+    { if [[ -s "$file" ]]; then printf '\n'; fi; printf '%s\n' "$*"; } >> "$file" ||
+        printf 'ERROR: cannot append fnOS failure notice: %s\n' "$file" >&2
+    return 0
+}
 
-pkill -f "(bun|node).*monitor\.js" 2>/dev/null || true
-pkill -f "hermes.*gateway" 2>/dev/null || true
-pkill -f "hermes.*dashboard" 2>/dev/null || true
+hook_record() {
+    printf '%s [%s] %s rc=%s stage=%s uid=%s TRIM_APPDEST=%q TRIM_PKGHOME=%q TRIM_PKGVAR=%q\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S%z')" "$HOOK_NAME" "$1" "$2" "$HOOK_STAGE" "$EUID" \
+        "${TRIM_APPDEST:-}" "${TRIM_PKGHOME:-}" "${TRIM_PKGVAR:-}"
+}
 
+# 失败时摘录本次运行写入日志的最后几行，让 fnOS 对话框直接显示具体原因。
+hook_log_excerpt() {
+    local line toast="${TRIM_TEMP_LOGFILE:-}"
+    local -a lines=()
+    [[ "$HOOK_LOG_READY" == 1 && -r "$HOOK_LOG_FILE" ]] || return 0
+    while IFS= read -r line; do
+        if [[ "$line" == *" [$HOOK_NAME] BEGIN rc=- "* ]]; then lines=(); continue; fi
+        [[ -n "$line" && "$line" != *" [$HOOK_NAME] END rc="* ]] || continue
+        # 已由 toast_err 写入提示文件的原文不再重复。
+        if [[ -f "$toast" ]] && grep -qxF -- "$line" "$toast" 2>/dev/null; then continue; fi
+        lines+=("${line:0:300}")
+        (( ${#lines[@]} <= 8 )) || lines=("${lines[@]:1}")
+    done < <(tail -n 200 -- "$HOOK_LOG_FILE" 2>/dev/null)
+    (( ${#lines[@]} )) || return 0
+    printf '日志摘录：\n'
+    printf '  %s\n' "${lines[@]}"
+}
+
+hook_exit() {
+    local rc="$1" notice excerpt=""
+    trap - EXIT ERR
+    if [[ "$HOOK_LOG_READY" == 1 ]]; then
+        if ! hook_record END "$rc"; then
+            HOOK_LOG_READY=0
+            printf 'ERROR: cannot write END (rc=%s) to %s\n' "$rc" "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+        fi
+    else
+        hook_record BEGIN - >&"$HOOK_ORIGINAL_STDERR" || :
+        hook_record END "$rc" >&"$HOOK_ORIGINAL_STDERR" || :
+    fi
+    if (( rc != 0 )); then
+        notice="${HOOK_NAME} 阶段 ${HOOK_STAGE} 失败（退出码 ${rc}，行 ${HOOK_FAILED_LINE:-unknown}）；日志：${HOOK_LOG_FILE}"
+        if [[ "$HOOK_LOG_READY" != 1 ]]; then
+            notice="${notice}（日志不可写，未能完整保存）"
+            printf '%s\n' "$notice" >&"$HOOK_ORIGINAL_STDERR"
+        else
+            excerpt="$(hook_log_excerpt)"
+            printf '%s\n' "$notice" >&2
+        fi
+        hook_append_toast "$notice${excerpt:+$'\n'$excerpt}"
+    fi
+    exit "$rc"
+}
+trap 'hook_exit "$?"' EXIT
+
+# 仅首次创建时使用私有 umask 和 noclobber 独占打开。
+if [[ -L "$HOOK_LOG_FILE" || ( -e "$HOOK_LOG_FILE" && ! -f "$HOOK_LOG_FILE" ) ]]; then
+    printf 'ERROR: refusing symlink or non-regular hook log: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+    exit 1
+fi
+if [[ ! -e "$HOOK_LOG_FILE" ]]; then
+    (umask 077; set -o noclobber; : > "$HOOK_LOG_FILE") || {
+        printf 'ERROR: cannot create hook log: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+        exit 1
+    }
+fi
+if [[ -L "$HOOK_LOG_FILE" || ! -f "$HOOK_LOG_FILE" || ! -w "$HOOK_LOG_FILE" ]]; then
+    printf 'ERROR: hook log is not a writable regular file: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+    exit 1
+fi
+if ! { exec >> "$HOOK_LOG_FILE" 2>&1; }; then
+    printf 'ERROR: cannot append hook log: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+    exit 1
+fi
+# 写入前再校验已打开的文件本身，而不只是打开前的路径名。
+if [[ -L "$HOOK_LOG_FILE" || ! -f /proc/self/fd/1 || ! "$HOOK_LOG_FILE" -ef /proc/self/fd/1 ]]; then
+    printf 'ERROR: hook log changed while opening: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+    exit 1
+fi
+if ! { printf '\n%s\n' '------------------------------------------------------------------------' && hook_record BEGIN -; }; then
+    printf 'ERROR: cannot write BEGIN to hook log: %s\n' "$HOOK_LOG_FILE" >&"$HOOK_ORIGINAL_STDERR"
+    exit 1
+fi
+HOOK_LOG_READY=1
+HOOK_STAGE=path-validation
+# END shared hook logging：公共日志块结束。
+
+
+for name in TRIM_APPDEST TRIM_PKGHOME TRIM_PKGVAR; do
+    value="${!name}"
+    case "$value" in
+        /*) ;;
+        *) printf '%s must be an absolute path\n' "$name" >&2; exit 1 ;;
+    esac
+    while [[ "$value" == */ && "$value" != / ]]; do value="${value%/}"; done
+    case "$value/" in
+        /|//|*/../*|*/./*) printf 'Invalid path: %s\n' "$name" >&2; exit 1 ;;
+    esac
+    printf -v "$name" '%s' "$value"
+done
+APP_DIR="$TRIM_APPDEST"
+DATA_DIR="$TRIM_PKGHOME/data"
+VAR_DIR="$TRIM_PKGVAR"
+SOCKET_PATH="$APP_DIR/hermes-agent.sock"
+mkdir -p -- "$VAR_DIR" || exit 1
+LOG_FILE="$VAR_DIR/info.log"
+: >> "$LOG_FILE" || exit 1
+log_msg() {
+    local msg="$(date '+%Y-%m-%d %H:%M:%S') [${0##*/}] $*"
+    printf '%s\n' "$msg"
+    printf '%s\n' "$msg" >> "$LOG_FILE"
+}
+fail() { HOOK_FAILED_LINE="${BASH_LINENO[0]}"; log_msg "ERROR: $*"; exit 1; }
+
+valid_pid() { [[ "$1" =~ ^[1-9][0-9]*$ && ${#1} -le 10 && "$1" != 1 ]]; }
+process_start() {
+    local line
+    local -a fields
+    PROC_STATE=""
+    IFS= read -r line 2>/dev/null < "/proc/$1/stat" || return 1
+    read -r -a fields <<< "${line##*) }"
+    PROC_STATE="${fields[0]}"
+    [[ "$PROC_STATE" != Z && "$PROC_STATE" != X && ${fields[19]} =~ ^[0-9]+$ ]] || return 1
+    PROC_START="${fields[19]}"
+}
+
+# 与 cmd/main 相同的 argv、NUL 分隔环境变量和启动时间校验。
+# 身份以环境变量为准：APP_DIR、DATA_DIR 精确匹配、HOME 指向 DATA_DIR 且 HERMES_HOME 无冲突，
+# 命令形态只决定停止顺序，不逐字匹配参数。网关重启、Dashboard 重执行、任务派生的
+# hermes 子命令都属于本实例，必须一并停止，否则新文件就位时它们仍在使用旧代码。
+# 身份只部分匹配视为阻塞项，而不是 kill 的许可。绝不按端口或进程名选择进程。
+owned_process() {
+    local pid="$1" expected="${2:-}" entry start app=0 data=0 home=0 conflict=0 role=0
+    local hermes_home=0 hermes_entry=""
+    local -a args=() sub=()
+    PROC_RELATED=0
+    PROC_KIND=""
+    valid_pid "$pid" || return 1
+    [[ -r "/proc/$pid/cmdline" ]] || return 1
+    while IFS= read -r -d '' entry; do
+        args+=("$entry")
+        case "$entry" in
+            "$APP_DIR"/server/*|"$DATA_DIR"/venv/bin/hermes) PROC_RELATED=1 ;;
+        esac
+        case "${entry##*/}" in boot.js|monitor.js|hermes) role=1 ;; esac
+    done 2>/dev/null < "/proc/$pid/cmdline"
+    # 识别 hermes 入口：venv/bin/hermes 脚本，或 python [-P] -m hermes_cli.main，
+    # 记下入口之后的子命令参数供分类用。
+    if [[ "${args[0]##*/}" == python* && "${args[1]}" == "$DATA_DIR/venv/bin/hermes" ]]; then
+        args=("${args[@]:1}")
+    fi
+    if [[ "${args[0]}" == "$DATA_DIR/venv/bin/hermes" ]]; then
+        hermes_entry=bin
+        sub=("${args[@]:1}")
+    elif [[ "${args[1]}" == -m && "${args[2]}" == hermes_cli.main ]]; then
+        hermes_entry=module
+        sub=("${args[@]:3}")
+    elif [[ "${args[1]}" == -P && "${args[2]}" == -m && "${args[3]}" == hermes_cli.main ]]; then
+        hermes_entry=module
+        sub=("${args[@]:4}")
+    fi
+    # PID 文件或环境变量缺失时，模块身份匹配也作为相关进程提示。
+    # 提示只用于阻塞预检，绝不授权发送信号。
+    if [[ "$hermes_entry" == module ]]; then
+        role=1
+        if [[ "${args[0]}" == "$DATA_DIR/venv/bin/python" || "${args[0]}" == "$DATA_DIR/venv/bin/python3" ]]; then
+            PROC_RELATED=1
+        else
+            hermes_entry=""
+        fi
+    fi
+    if ! process_start "$pid"; then
+        # 僵尸进程或已消失的条目不算残留运行进程。
+        if [[ ! -d "/proc/$pid" || "$PROC_STATE" == Z || "$PROC_STATE" == X ]]; then PROC_RELATED=0; fi
+        return 1
+    fi
+    start="$PROC_START"
+    [[ -z "$expected" || "$start" == "$expected" ]] || return 1
+    [[ -r "/proc/$pid/environ" ]] || return 1
+    while IFS= read -r -d '' entry; do
+        case "$entry" in
+            APP_DIR=*) if [[ "$entry" == "APP_DIR=$APP_DIR" ]]; then app=1; else conflict=1; fi ;;
+            DATA_DIR=*) if [[ "$entry" == "DATA_DIR=$DATA_DIR" ]]; then data=1; else conflict=1; fi ;;
+            HOME=*) if [[ "$entry" == "HOME=$DATA_DIR" ]]; then
+                home=1
+                [[ "$role" == 0 ]] || PROC_RELATED=1
+            fi ;;
+            HERMES_HOME=*) if [[ "$entry" == "HERMES_HOME=$DATA_DIR" ]]; then
+                hermes_home=1
+                [[ "$role" == 0 ]] || PROC_RELATED=1
+            else conflict=1; fi ;;
+        esac
+    done 2>/dev/null < "/proc/$pid/environ"
+    if [[ "$role" == 1 && ( "$app" == 1 || "$data" == 1 ) ]]; then PROC_RELATED=1; fi
+    [[ "$app" == 1 && "$data" == 1 && "$conflict" == 0 ]] || return 1
+    if [[ ( "${args[0]##*/}" == node || "${args[0]##*/}" == nodejs || "${args[0]##*/}" == bun ) &&
+          ( "${args[1]}" == "$APP_DIR/server/boot.js" || "${args[1]}" == "$APP_DIR/server/monitor.js" ) ]]; then
+        PROC_KIND=boot
+    else
+        [[ -n "$hermes_entry" && "$home" == 1 ]] || return 1
+        # 跳过 profile 选择参数后按子命令分类。未知子命令统一归为 hermes，最后停止。
+        while [[ ${#sub[@]} -ge 2 && ( "${sub[0]}" == --profile || "${sub[0]}" == -p ) ]]; do
+            sub=("${sub[@]:2}")
+        done
+        case "${sub[0]}" in
+            gateway) PROC_KIND=gateway ;;
+            dashboard|serve) PROC_KIND=dashboard ;;
+            *) PROC_KIND=hermes ;;
+        esac
+    fi
+    process_start "$pid" && [[ "$PROC_START" == "$start" ]]
+}
+
+# 停止任何进程前先校验所有已知 PID 文件。过期或被复用的存活 PID
+# 不能被默默接受为正常状态，也绝不向其发送信号。
+check_pid_files() {
+    local file pid
+    for file in "$VAR_DIR"/{app,monitor,gateway,dashboard}.pid; do
+        [[ -e "$file" || -L "$file" ]] || continue
+        [[ -f "$file" && -r "$file" && ! -L "$file" ]] || fail "Unverifiable PID file: $file"
+        pid=$(< "$file")
+        valid_pid "$pid" || fail "Invalid PID file: $file"
+        if process_start "$pid"; then
+            owned_process "$pid" || fail "PID ownership cannot be verified: $file ($pid)"
+        elif [[ -d "/proc/$pid" && "$PROC_STATE" != Z && "$PROC_STATE" != X ]]; then
+            fail "PID start time cannot be verified: $file ($pid)"
+        fi
+    done
+}
+
+collect_owned() {
+    local entry pid
+    PIDS=() STARTS=() KINDS=()
+    for entry in /proc/[0-9]*; do
+        pid="${entry##*/}"
+        if owned_process "$pid"; then
+            PIDS+=("$pid") STARTS+=("$PROC_START") KINDS+=("$PROC_KIND")
+        elif [[ "$PROC_RELATED" == 1 ]]; then
+            fail "App-related process cannot be safely stopped: $pid ($(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-300))"
+        fi
+    done
+}
+
+stop_owned() {
+    local i pid kind deadline active
+    local -a PIDS STARTS KINDS
+    collect_owned
+    for i in "${!PIDS[@]}"; do
+        if [[ "${KINDS[$i]}" == boot ]] && { [[ ! -r "$APP_DIR/server/monitor.js" ]] || grep -Eq 'forceKillHermes|pkill' "$APP_DIR/server/monitor.js"; }; then
+            fail 'Running monitor has an unverified shutdown handler; stop this application in fnOS before upgrading. No process was signalled.'
+        fi
+    done
+    # 先停 monitor，避免它重新拉起子进程。网关之后再停它派生的其它 hermes 子命令。
+    # 每次发信号前（含超时升级为 SIGKILL）都重新校验原始启动时间。
+    for kind in boot gateway dashboard hermes; do
+        for i in "${!PIDS[@]}"; do
+            [[ "${KINDS[$i]}" == "$kind" ]] || continue
+            pid="${PIDS[$i]}"
+            if owned_process "$pid" "${STARTS[$i]}"; then
+                log_msg "SIGTERM $kind pid=$pid start=${STARTS[$i]}"
+                kill -TERM -- "$pid" 2>/dev/null || true
+            fi
+        done
+        deadline=$((SECONDS + 35))
+        while (( SECONDS < deadline )); do
+            active=0
+            for i in "${!PIDS[@]}"; do
+                [[ "${KINDS[$i]}" == "$kind" ]] || continue
+                pid="${PIDS[$i]}"
+                if process_start "$pid"; then
+                    if [[ "$PROC_START" == "${STARTS[$i]}" ]]; then
+                        if ! owned_process "$pid" "${STARTS[$i]}"; then
+                            # 收到信号正在退出的进程 cmdline 已清空，继续等待而不是判定身份变化。
+                            [[ -z "$(tr -d '\0' < "/proc/$pid/cmdline" 2>/dev/null)" ]] ||
+                                fail "Ownership changed while stopping PID $pid"
+                        fi
+                        active=1
+                    fi
+                elif [[ -d "/proc/$pid" && "$PROC_STATE" != Z && "$PROC_STATE" != X ]]; then
+                    fail "Cannot verify whether PID $pid stopped"
+                fi
+            done
+            [[ "$active" == 1 ]] || break
+            sleep 0.2
+        done
+        for i in "${!PIDS[@]}"; do
+            [[ "${KINDS[$i]}" == "$kind" ]] || continue
+            pid="${PIDS[$i]}"
+            if owned_process "$pid" "${STARTS[$i]}"; then
+                log_msg "SIGKILL $kind pid=$pid start=${STARTS[$i]} after 35s"
+                kill -KILL -- "$pid" 2>/dev/null || true
+            fi
+        done
+    done
+    sleep 0.2
+    for i in "${!PIDS[@]}"; do
+        pid="${PIDS[$i]}"
+        if process_start "$pid"; then
+            [[ "$PROC_START" != "${STARTS[$i]}" ]] || fail "Owned processes still running: $pid"
+        elif [[ -d "/proc/$pid" && "$PROC_STATE" != Z && "$PROC_STATE" != X ]]; then
+            fail "Cannot verify whether PID $pid stopped"
+        fi
+    done
+    collect_owned
+    [[ ${#PIDS[@]} == 0 ]] || fail 'Owned processes still running; refusing to continue'
+}
+
+# 不删除任何 socket。即使监听者没有可读的 PID 也必须阻塞流程，
+# 过期的未绑定 socket 留给新 boot 的存活探测处理。
+check_socket() {
+    local num refs protocol flags type state inode path canonical
+    [[ -r /proc/net/unix ]] || fail 'Cannot inspect Unix listeners'
+    canonical=$(readlink -m -- "$SOCKET_PATH") || fail 'Cannot resolve socket path'
+    while read -r num refs protocol flags type state inode path; do
+        [[ -n "$path" ]] || continue
+        if [[ "$path" == "$SOCKET_PATH" || "$path" == "$canonical" || "$path" -ef "$SOCKET_PATH" ]]; then
+            fail "Socket still registered; listener ownership not proven: $path"
+        fi
+    done < /proc/net/unix
+}
+
+HOOK_STAGE=stop-services
+[[ -d /proc/self && -r /proc/net/unix ]] || fail 'Linux procfs is required for safe preflight'
+log_msg "Preflight APP_DIR=$APP_DIR DATA_DIR=$DATA_DIR"
+check_pid_files
+stop_owned
+check_pid_files
+check_socket
+log_msg 'Uninstall preflight complete; only verified instance processes stopped'
 exit 0

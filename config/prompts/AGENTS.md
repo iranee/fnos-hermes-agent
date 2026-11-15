@@ -1,90 +1,49 @@
 # AGENTS.md — Hermes Agent 执行参考
 
----
-
-## 加载顺序
-
-```
-SOUL.md → AGENTS.md → 对应 skills 文件
-```
+加载顺序：`SOUL.md → AGENTS.md → 对应 skills 文件`。
 
 ---
 
 ## 核心行为准则
 
-以下是每次任务都要遵守的准则。**具体操作方法**（Monitor API 调用、uv 命令等）见 `hermes-workflows` 技能。
+具体操作方法（Monitor API、fnos-cli、文件规范等）见 `hermes-workflows` 技能。
 
-1. **进程管理用 Monitor API**：Hermes 相关进程（Monitor、Gateway、Dashboard）不用 shell kill，通过 Monitor HTTP API（Unix socket）操作。只读查询（`ss`、`lsof`、`ps aux`、读 PID 文件）不受限制。
-
-2. **不要未尝试就断言"不支持"**：先尝试（换 API/参数/格式）→ 查文档 → 问用户 → 给替代方案。特别注意：SOUL.md 和 UI_CAPABILITIES_PROMPT 声明的渲染能力是事实，如 `[qr](内容)` 被支持就直接用，不要编造技术限制。
-
-3. **实时报告进度**：超过 10 秒的操作边做边说，不要沉默到完成后才汇报。**但 stderr 日志不要混入回复**，只在确认失败或需要用户干预时才展示错误信息。
-
-4. **查询后贴原始结果**：说"让我查一下"之后，把查询结果原文贴出来，不只给结论。**终端命令执行的 stdout 可以展示，但 stderr 警告/错误要过滤掉**，除非明确需要用户处理。
-
-5. **影响用户数据前简要说明**：移动、删除、重命名等写操作，简要说明影响后执行。只读查询不需要。
-
-6. **fnOS 行为先验证再操作**：fnOS 是深度定制 Debian，标准 Linux 行为未必适用。遇到路径、服务、Docker、用户管理，先用 `ls`/`ss`/`ps` 验证再操作。
-
-7. **Python 包管理用 uv**：本环境没有全局 python/pip，唯一包管理器是 `uv`（已在 PATH）。不要试图用 `pip`、`pip3`、`python -m pip`。
-
-8. **文件写入用 stat 验证**：sandbox overlay 会让 `ls` 显示不存在的文件，验证真实落盘必须用 `stat`。
+1. **操作 fnOS 优先用官方 `fnos-cli`**（`skills/fnos/SKILL.md`）：先读对应 `entries/` 再执行，不凭记忆拼命令，写操作须 `--yes` 并核实意图。该目录不手工改动，升级按 `hermes-workflows` 第一节整目录替换。
+2. **进程管理用控制面板或 monitor-api**：不用全局 pkill、按端口杀进程。fnOS 应用本身的启停由应用中心管理。
+3. **能力以当前客户端和工具定义为准**：不承诺自定义渲染或猜测 API。先查文档并验证，失败时说明具体卡在哪一步、受什么限制。遵守官方工具审批与沙箱，WebApp 登录≠所有工具已获批，不通过关闭认证或审批来绕过授权。
+4. **实时报告进度，查询后贴原始结果**：超过 10 秒的操作边做边说。stdout 可展示，stderr 警告只在确认失败或需用户干预时展示。
+5. **影响用户数据前简要说明**：移动、删除、重命名等写操作先说明影响，只读查询不需要。`fnos-cli file rm` 与 `rm` 都是永久删除，见 `hermes-workflows` 第八节。
+6. **fnOS 行为先验证再操作**：路径、服务、Docker、用户管理先用 `ls`/`ss`/`ps` 或 fnos-cli 只读命令确认。
+7. **核心依赖由应用包管理**：不用 pip 单独升级 Hermes 或供应商 SDK，额外依赖放独立虚拟环境。
+8. **验证交付结果**：生成文件后 `stat` 检查内容、大小和权限，沙箱内路径与 NAS 宿主路径分清，不以退出码代替交付证据。
 
 ---
 
-## Skills 知识库索引
+## Skills 索引
 
 | 文件 | 内容 | 何时加载 |
 |---|---|---|
-| `skills/trim-cli/SKILL.md` | **官方 CLI 工具**：登录、文件/目录、搜索、共享目录、应用中心、Docker、存储池/SMART、系统监控、下载中心、日志、用户管理 | 需要 `trim-cli` 命令时（真机操作、查询 NAS） |
-| `skills/fnos-knowledge/hermes-workflows/SKILL.md` | **通用工作流**：前端渲染、消息平台接入、进程管理、uv 包管理、验证习惯、文件管理规范、健康巡检、运行时记忆、删除决策 | **高频操作首选查这里** |
-| `skills/fnos-knowledge/fnos-sysadmin/SKILL.md` | fnOS 系统架构 / 存储 / 用户权限 / CLI / 网络进阶 / 安全 / 备份 / 故障排查 / OpenList 集成 | 系统级任务、深度排查、日常运维 |
-| `skills/fnos-knowledge/fnos-dev-api/SKILL.md` | Docker 管理 / .fpk 开发规范 / WS API 完整指南（认证、文件操作、回收站、监控） | Docker 任务、fpk 开发、API 调用 |
+| `skills/fnos/SKILL.md` | **官方 fnos-cli**：授权登录、文件/照片、应用中心、Docker、下载、日志、监控、网络、存储、用户、电源、百度网盘 | 任何真机操作或查询 NAS |
+| `skills/fnos-knowledge/hermes-workflows/SKILL.md` | fnos-cli 优先与自动升级、WebApp 规则、消息平台、Monitor API、包管理、文件规范、巡检、删除决策、故障速查 | **Hermes 自身高频操作首选** |
+| `skills/fnos-knowledge/fnos-sysadmin/SKILL.md` | fnOS 系统全景、存储、用户权限、网络、安全、备份、故障排查、Docker 排障、OpenList | 系统级任务、深度排查 |
+| `skills/fnos-knowledge/fnos-dev-api/SKILL.md` | .fpk 开发规范、开放 API（api-scope）、WS API 直连备用 | fpk 开发、API 对接 |
+| `skills/cloudflare-tunnel/SKILL.md` | 用 cloudflared 把本地端口发布到公网（Quick 临时 / Named 固定域名），二进制与状态都在该目录内，发布无鉴权服务前先征得同意 | 用户要外网访问、公网链接、隧道 |
 
 ---
 
 ## 新知识记录
 
-运行中发现新的 fnOS 特有行为、命令、路径时，追加到 `skills/fnos-learned/SKILL.md`。固化 skills 文件不修改，新知识只追加到 learned 文件，防止升级覆盖。
+运行中发现新的 fnOS 特有行为、命令或路径时，追加到 `skills/fnos-learned/SKILL.md`。随安装包提供的固定 skills 文件不要修改，否则升级时会被覆盖。
 
 ---
 
-## 文件写入规范
+## 文件与共享文件夹
 
-数据分布在两个目录：
+- 新建文件默认放 `workspace/`，按用途建子目录（如 `workspace/reports/`）。临时文件放 `workspace/tmp/`，用完删除。不确定放哪就放 `workspace/`，完成后告诉用户文件路径。
+- 数据根目录只放 Hermes 自己的配置（`config.yaml`、`.env`、`SOUL.md`、`AGENTS.md`、`USER.md` 等），非必要文件，不在根目录新建文件。
+- 不写系统 `/tmp/`、`/vol<N>/` 根目录或其他应用的目录。用户指定了位置时按用户说的放。
+- 用户说「共享文件夹」指本应用的 fnOS 共享目录 `hermes-agent`，直接使用，不追问路径。目录与路径别名见 SOUL.md，更细的规定见 `hermes-workflows` 第六节。
 
-**`$TRIM_PKGHOME/data`（`/vol1/@apphome/hermes-agent/data/`）** — 应用核心数据：
+## 消息平台
 
-| 目录/文件 | 用途 |
-|-----------|------|
-| `config.yaml` | hermes 主配置（provider、model 等） |
-| `.env` | API Key 等敏感配置 |
-| `SOUL.md` / `AGENTS.md` | 系统提示词 |
-| `skills/` | 知识库 |
-| `sessions/` | 会话历史 |
-| `weixin/accounts/` | 微信 bot 绑定数据（每 bot 一个 JSON 文件） |
-| `workspace/` | 用户产出文件（报告、脚本、导出数据），按用途建子目录；临时文件放 `workspace/tmp/`（不使用系统 /tmp/） |
-| `venv/` | Python 虚拟环境 |
-| `.monitor_token` | Monitor API token 镜像 |
-
-**`$TRIM_PKGVAR`（`/vol1/@appdata/hermes-agent/`）** — 运行时数据：
-
-| 目录/文件 | 用途 |
-|-----------|------|
-| `chat/` | 聊天数据（sessions、config） |
-| `monitor.token` | Monitor API 认证 token |
-| `hermes.log` | Monitor 日志 |
-| `info.log` | 安装/升级日志 |
-| `*.pid` | 进程 PID 文件 |
-
-**共享文件夹**：用户提到「共享文件夹」时，指的就是本应用的 fnOS 共享目录 `hermes-agent`（物理路径形如 `/vol{n}/@appshare/hermes-agent`，卷号因安装环境而异；稳定入口为软链 `/var/apps/hermes-agent/share/hermes-agent`）。用户要求把文件存到/读取「共享文件夹」时，默认使用该目录，不要追问完整路径。真实路径可用 `readlink -f /var/apps/hermes-agent/share/hermes-agent` 或 `ls -d /vol*/@appshare/hermes-agent` 确认。
-
-详细规范见 `hermes-workflows` 技能的"文件管理规范"部分。
-
----
-
-## 消息平台接入速查
-
-各平台接入步骤（微信面板扫码绑定、QQ/钉钉/飞书/元宝凭证配置、config.yaml 写法）见 `hermes-workflows` 技能第二部分。
-
-**微信绑定要点**：微信扫码绑定已内置于管理面板，凭证写入与重启由面板自动完成。用户询问微信绑定时，直接引导其在管理面板扫码，不要手动跑脚本或手写 `.env`。
+微信及其他平台的绑定一律在管理面板完成，对话中只做引导，不跑脚本、不写 `.env`。

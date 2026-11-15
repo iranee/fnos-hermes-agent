@@ -1,210 +1,221 @@
-name: Build fnOS Hermes Agent FPK
+name: Build fnOS Hermes Agent
 
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: '版本号（格式：0.20.0.20，留空则使用 manifest 中的版本）'
+      hermes_version:
+        description: 'Hermes core tag (blank uses config/bootstrap/hermes-version.env, "latest" picks the newest official vX.Y.Z, e.g. v0.23.1)'
         required: false
-        default: ''
+        type: string
+      version:
+        description: 'Application version <core>-<serial> (required when the core changes, e.g. 0.23.1-022)'
+        required: false
+        type: string
+      publish:
+        description: 'Publish a new GitHub Release after successful tests'
+        required: true
+        default: false
+        type: boolean
+  push:
+    tags:
+      - 'fnos-hermes-agent_v*'
 
 permissions:
-  contents: write
+  contents: read
 
-env:
-  APP_NAME: "hermes-agent"
-  MANIFEST_FILE: "manifest"
+concurrency:
+  group: fnos-hermes-agent-${{ github.ref }}-${{ inputs.version }}
+  cancel-in-progress: false
 
 jobs:
-  build-fpk:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     outputs:
-      fpk_full: ${{ steps.build_full.outputs.fpk_full }}
-      fpk_light: ${{ steps.build_light.outputs.fpk_light }}
       version: ${{ steps.version.outputs.version }}
-
+      tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
     steps:
-      # 1. 检出代码
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
-
-      # 2. 设置时区
-      - name: Set timezone
-        run: sudo timedatectl set-timezone "Asia/Shanghai"
-
-      # 3. 读取 manifest 版本信息
-      - name: Get version from manifest
+      - name: Validate release version
         id: version
-        run: |
-          VERSION=$(grep "^version" ${{ env.MANIFEST_FILE }} | awk -F'=' '{print $2}' | tr -d ' ')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "从 manifest 读取的版本号：v$VERSION"
-
-      # 4. 确定最终版本号
-      - name: Determine target version
-        id: target_version
-        run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            TARGET_VERSION="${{ github.event.inputs.version }}"
-            echo "使用输入的版本号：v$TARGET_VERSION"
-          else
-            TARGET_VERSION="${{ steps.version.outputs.version }}"
-            echo "使用 manifest 版本号：v$TARGET_VERSION"
-          fi
-          echo "target_version=$TARGET_VERSION" >> $GITHUB_OUTPUT
-
-      # 5. 安装 fnpack 工具
-      - name: Install fnpack
-        run: |
-          FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.0.4-linux-amd64"
-          curl -fsSL "$FNPACK_URL" -o fnpack
-          chmod +x fnpack
-          mv fnpack /usr/local/bin/
-          which fnpack
-          echo "fnpack 已安装并可用"
-
-      # 6. 更新 manifest 和 app-version.env
-      - name: Update manifest and app version
-        run: |
-          VERSION="${{ steps.target_version.outputs.target_version }}"
-          # 更新 manifest
-          sed -i "s/^version.*=/version       = $VERSION/" ${{ env.MANIFEST_FILE }} || exit 1
-          # 同步到 app-version.env（运行时从该文件读取版本）
-          echo "APP_VERSION=$VERSION" > config/bootstrap/app-version.env
-          echo "Updated manifest:" && grep "^version" ${{ env.MANIFEST_FILE }}
-          echo "Updated app version:" && cat config/bootstrap/app-version.env
-
-      # 7. 创建输出目录
-      - name: Create dist directory
-        run: mkdir -p dist
-
-      # 8. 打包应用（常规版）
-      - name: Build FPK (Full)
-        id: build_full
-        run: |
-          FNPACK="fnpack"
-          APP_DIR="$GITHUB_WORKSPACE"
-          VERSION="${{ steps.target_version.outputs.target_version }}"
-          
-          echo "开始打包：${{ env.APP_NAME }} (完整版)"
-          echo "目标版本：v$VERSION"
-          
-          cd "$APP_DIR"
-          
-          if ! "$FNPACK" build --directory "$APP_DIR"; then
-            echo "::error:: fnpack 打包失败"
-            exit 1
-          fi
-          
-          SOURCE_FPK="${{ env.APP_NAME }}.fpk"
-          DIST_DIR="dist"
-          TARGET_NAME="fnos-${{ env.APP_NAME }}_v${VERSION}.fpk"
-          
-          if [ -f "$SOURCE_FPK" ]; then
-            mv "$SOURCE_FPK" "$DIST_DIR/$TARGET_NAME"
-            SIZE=$(du -h "$DIST_DIR/$TARGET_NAME" | cut -f1)
-            echo "打包成功：$TARGET_NAME ($SIZE)"
-            echo "fpk_full=$TARGET_NAME" >> $GITHUB_OUTPUT
-            echo "size_full=$SIZE" >> $GITHUB_OUTPUT
-          else
-            echo "::error:: fnpack 未生成 FPK 文件"
-            exit 1
-          fi
-
-      # 9. 打包轻量版（剔除 trim-cli）
-      - name: Build FPK (Lightweight, No TrimCLI)
-        id: build_light
-        run: |
-          FNPACK="fnpack"
-          APP_DIR="$GITHUB_WORKSPACE"
-          VERSION="${{ steps.target_version.outputs.target_version }}"
-          LIGHTWORK_DIR="$GITHUB_WORKSPACE-light"
-          
-          echo "开始打包：${{ env.APP_NAME }} (轻量版，无 trim-cli)"
-          echo "目标版本：v$VERSION"
-          
-          # 复制全部文件到临时目录（含隐藏文件），并移除输出目录避免把完整版 FPK 打进轻量包
-          rm -rf "$LIGHTWORK_DIR"
-          mkdir -p "$LIGHTWORK_DIR"
-          cp -a "$APP_DIR"/. "$LIGHTWORK_DIR/"
-          rm -rf "$LIGHTWORK_DIR/dist"
-          
-          # 递归删除 trim-cli 目录（如果存在）
-          if [ -d "$LIGHTWORK_DIR/config/prompts/skills/trim-cli" ]; then
-            rm -rf "$LIGHTWORK_DIR/config/prompts/skills/trim-cli"
-            echo "已删除 config/prompts/skills/trim-cli"
-          fi
-          
-          cd "$LIGHTWORK_DIR"
-          
-          if ! "$FNPACK" build --directory "$LIGHTWORK_DIR"; then
-            echo "::error:: fnpack 轻量版打包失败"
-            exit 1
-          fi
-          
-          SOURCE_FPK="${{ env.APP_NAME }}.fpk"
-          DIST_DIR="$APP_DIR/dist"
-          TARGET_NAME="fnos-${{ env.APP_NAME }}_v${VERSION}_无trimcli.fpk"
-          
-          if [ -f "$SOURCE_FPK" ]; then
-            mv "$SOURCE_FPK" "$DIST_DIR/$TARGET_NAME"
-            SIZE=$(du -h "$DIST_DIR/$TARGET_NAME" | cut -f1)
-            echo "打包成功：$TARGET_NAME ($SIZE)"
-            echo "fpk_light=$TARGET_NAME" >> $GITHUB_OUTPUT
-            echo "size_light=$SIZE" >> $GITHUB_OUTPUT
-            
-            # 清理临时工作目录
-            rm -rf "$LIGHTWORK_DIR"
-          else
-            echo "::error:: fnpack 未生成轻量版 FPK 文件"
-            exit 1
-          fi
-
-      # 10. 准备 Release 说明
-      - name: Generate release notes
-        id: release_notes
-        run: |
-          VERSION="${{ steps.target_version.outputs.target_version }}"
-          FPK_NAME="fnos-${{ env.APP_NAME }}_v${VERSION}.fpk"
-          
-          printf '*%s*\n\n' "$VERSION" > release_body.md
-          printf '\n*Commit: %s*\n' "${{ github.sha }}" >> release_body.md
-
-          echo "Release notes 已生成"
-
-      # 11. 创建 Draft Release
-      - name: Create Draft Release
-        id: create_release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_CORE: ${{ inputs.hermes_version }}
         run: |
-          VERSION="${{ steps.target_version.outputs.target_version }}"
-          RELEASE_TAG="v${VERSION}"
-          DIST_DIR="dist"
-          
-          echo "创建 Draft Release: $RELEASE_TAG"
-          echo "待上传文件："
-          ls -1 "$DIST_DIR"/*.fpk
-          
-          gh release create "$RELEASE_TAG" \
-            "$DIST_DIR"/*.fpk \
-            --draft \
-            --title "$VERSION" \
-            --notes-file release_body.md || exit 1
-          
-          echo "Draft Release 已创建"
-          echo "release_url=https://github.com/${{ github.repository }}/releases/tag/$RELEASE_TAG" >> $GITHUB_OUTPUT
+          python3 - <<'PY'
+          import os, re, subprocess
+          from pathlib import Path
+          UPSTREAM = 'https://github.com/NousResearch/hermes-agent.git'
+          def assignments(path):
+              return dict(re.findall(r'^([A-Z_a-z][\w]*)\s*=\s*(.*?)\s*$', Path(path).read_text(), re.M))
+          def key(tag):
+              return tuple(int(part) for part in tag[1:].split('.'))
+          manifest = assignments('manifest')
+          app = assignments('config/bootstrap/app-version.env')
+          core = assignments('config/bootstrap/hermes-version.env')
+          requested_core = os.environ.get('REQUESTED_CORE', '').strip()
+          if requested_core:
+              if os.environ['GITHUB_EVENT_NAME'] != 'workflow_dispatch':
+                  raise SystemExit('Core selection is only allowed for manual runs')
+              refs = {}
+              for line in subprocess.check_output(['git', 'ls-remote', '--tags', UPSTREAM], text=True).splitlines():
+                  sha, ref = line.split('\t')
+                  refs[ref.removeprefix('refs/tags/')] = sha
+              # v2026.x.y 是上游早期按日期命名的旧版本，按版本号排序会排到最前，必须排除。
+              def official(t):
+                  return re.fullmatch(r'v\d+\.\d+\.\d+', t) and int(t[1:].split('.')[0]) < 2000
+              stable = sorted((t for t in refs if official(t)), key=key)
+              tag = stable[-1] if requested_core == 'latest' else requested_core
+              if not official(tag) or tag not in refs or tag + '^{}' not in refs:
+                  raise SystemExit(f'Not an official annotated release tag: {tag}')
+              core = {'HERMES_VERSION': tag, 'HERMES_COMMIT': refs[tag + '^{}'], 'HERMES_TAG': refs[tag]}
+              Path('config/bootstrap/hermes-version.env').write_text(''.join(f'{k}={v}\n' for k, v in core.items()))
+          if (not re.fullmatch(r'v\d+\.\d+\.\d+', core.get('HERMES_VERSION', ''))
+                  or not all(re.fullmatch(r'[0-9a-f]{40}', core.get(k, '')) for k in ('HERMES_COMMIT', 'HERMES_TAG'))):
+              raise SystemExit('Invalid config/bootstrap/hermes-version.env')
+          prefix = core['HERMES_VERSION'][1:]
+          version = os.environ.get('REQUESTED_VERSION', '').strip() or manifest['version']
+          if not re.fullmatch(re.escape(prefix) + r'-[0-9]*[1-9][0-9]*', version):
+              raise SystemExit(f'Application version must be {prefix}-<serial>, got {version}')
+          if app.get('APP_VERSION') != manifest['version']:
+              raise SystemExit('manifest and app-version.env disagree')
+          tag = 'fnos-hermes-agent_v' + version
+          if os.environ['GITHUB_EVENT_NAME'] == 'push' and os.environ['GITHUB_REF'] != 'refs/tags/' + tag:
+              raise SystemExit('Pushed tag must match manifest version')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+              stream.write(f'version={version}\ntag={tag}\ncommit={commit}\ncore={core["HERMES_VERSION"]}\n')
+          PY
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '26.12.1'
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.14'
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: '0.13.5'
+          enable-cache: false
+      - name: Prepare test dependencies
+        run: |
+          npm install --global npm@11.20.0
+          npm ci --include=dev --ignore-scripts --no-audit --no-fund
+          npm ci --prefix app/server/vendor/whatsapp-bridge --ignore-scripts --no-audit --no-fund
+          python -m pip install PyYAML==6.0.3
+          NPM_CLI="$(npm root --global)/npm/bin/npm-cli.js"
+          test -f "$NPM_CLI"
+          printf 'WHATSAPP_TEST_NPM_CLI=%s\nPROXY_TEST_NPM_CLI=%s\n' "$NPM_CLI" "$NPM_CLI" >> "$GITHUB_ENV"
+          FNPACK="$RUNNER_TEMP/fnpack-1.2.3-linux-amd64"
+          curl --fail --show-error --location https://static2.fnnas.com/fnpack/fnpack-1.2.3-linux-amd64 --output "$FNPACK"
+          printf '54b97fa7b70968c4d05c79840f5daeff508957d0bb2062fdb0376d00d9615c93  %s\n' "$FNPACK" | sha256sum --check
+          chmod 755 "$FNPACK"
+          printf 'FNPACK_BIN=%s\nFNPACK_TEST_PATH=%s\n' "$FNPACK" "$FNPACK" >> "$GITHUB_ENV"
+          npm run build:qr
+      - name: Prepare Chinese browser fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends fonts-noto-cjk
+      - name: Build pinned official WebApp, Dashboard and TUI
+        env:
+          HERMES_BUILD_WORK: ${{ runner.temp }}/hermes-build-${{ github.run_id }}-${{ github.run_attempt }}
+          HERMES_BUILD_PYTHON: '3.14'
+        run: bash scripts/ci-runtime.sh
+      - name: Build and verify application package
+        env:
+          BUILD_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bash build.sh --version "$BUILD_VERSION" --arch x86_64,aarch64
+          (cd dist && for a in x86_64 arm64; do sha256sum --check "fnos-hermes-agent_v${BUILD_VERSION}_$a.fpk.sha256"; done)
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        env:
+          NOTES_VERSION: ${{ steps.version.outputs.version }}
+          NOTES_CORE: ${{ steps.version.outputs.core }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          version = os.environ['NOTES_VERSION']
+          changelog = Path('CHANGELOG.md')
+          text = changelog.read_text(encoding='utf-8') if changelog.is_file() else ''
+          match = re.search(r'^## ' + re.escape(version) + r'(?:[ （(][^\n]*)?\n(.*?)(?=^## |\Z)', text, re.M | re.S)
+          body = match.group(1).strip() if match else ''
+          footer = '安装包：_x86_64 适用于 x86_64（Intel/AMD）设备，_arm64 适用于 ARM（aarch64）设备。内置 Hermes 内核 ' + os.environ['NOTES_CORE'] + '，运行环境在安装时联网下载，不含可选备份模块。'
+          # An empty file tells the release job that this version has no changelog entry.
+          Path('dist/release-notes.md').write_text(body + '\n\n' + footer + '\n' if body else '', encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: fnos-hermes-agent-${{ steps.version.outputs.version }}
+          path: |
+            dist/fnos-hermes-agent_v${{ steps.version.outputs.version }}_x86_64.fpk
+            dist/fnos-hermes-agent_v${{ steps.version.outputs.version }}_x86_64.fpk.sha256
+            dist/fnos-hermes-agent_v${{ steps.version.outputs.version }}_arm64.fpk
+            dist/fnos-hermes-agent_v${{ steps.version.outputs.version }}_arm64.fpk.sha256
+            dist/release-notes.md
+          if-no-files-found: error
+          retention-days: 14
 
-      # 12. 构建摘要
-      - name: Build Summary
+  release:
+    needs: build
+    if: github.event_name == 'push' || inputs.publish == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: fnos-hermes-agent-${{ needs.build.outputs.version }}
+          path: release
+      - name: Publish new release without replacing existing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+        working-directory: release
         run: |
-          echo "### ✅ 构建完成" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| 项目 | 版本 | FPK 文件名 | 大小 |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|------|-----------|------|" >> $GITHUB_STEP_SUMMARY
-          echo "| fnOS Hermes Agent（完整版） | v${{ steps.target_version.outputs.target_version }} | ${{ steps.build_full.outputs.fpk_full }} | ${{ steps.build_full.outputs.size_full }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| fnOS Hermes Agent（无 trimcli） | v${{ steps.target_version.outputs.target_version }} | ${{ steps.build_light.outputs.fpk_light }} | ${{ steps.build_light.outputs.size_light }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**[Draft Release](https://github.com/${{ github.repository }}/releases)** — 请确认后发布" >> $GITHUB_STEP_SUMMARY
+          set -euo pipefail
+          test -s release-notes.md || { echo "::error::CHANGELOG.md 缺少版本 ${RELEASE_VERSION} 的更新日志，拒绝发布"; exit 1; }
+          for a in x86_64 arm64; do sha256sum --check "fnos-hermes-agent_v${RELEASE_VERSION}_$a.fpk.sha256"; done
+          python3 - <<'PY'
+          import json, os, urllib.error, urllib.request
+          base = 'https://api.github.com/repos/' + os.environ['GH_REPO']
+          def lookup(path):
+              request = urllib.request.Request(base + path, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'})
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as error:
+                  if error.code == 404:
+                      return None
+                  raise SystemExit(f'Release lookup failed: HTTP {error.code}')
+          tag = os.environ['RELEASE_TAG']
+          if lookup('/releases/tags/' + tag) is not None:
+              raise SystemExit('Release already exists; refusing to replace it')
+          ref = lookup('/git/ref/tags/' + tag)
+          if ref is not None:
+              obj = ref['object']
+              for _ in range(8):
+                  if obj['type'] != 'tag':
+                      break
+                  annotation = lookup('/git/tags/' + obj['sha'])
+                  if annotation is None:
+                      raise SystemExit('Cannot resolve annotated tag')
+                  obj = annotation['object']
+              if obj['type'] != 'commit' or obj['sha'] != os.environ['RELEASE_COMMIT']:
+                  raise SystemExit('Existing tag does not match the tested source commit')
+          PY
+          gh release create "$RELEASE_TAG" \
+            "fnos-hermes-agent_v${RELEASE_VERSION}_x86_64.fpk" \
+            "fnos-hermes-agent_v${RELEASE_VERSION}_x86_64.fpk.sha256" \
+            "fnos-hermes-agent_v${RELEASE_VERSION}_arm64.fpk" \
+            "fnos-hermes-agent_v${RELEASE_VERSION}_arm64.fpk.sha256" \
+            --target "$RELEASE_COMMIT" --title "fnOS Hermes Agent $RELEASE_VERSION" \
+            --notes-file release-notes.md --draft

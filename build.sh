@@ -25,7 +25,7 @@
 #   runtime/hermes-src-v<ver>-<commit>.tar.gz(.sha256)  Hermes 内核源码
 #   runtime/tui/hermes-tui-v<ver>-<commit>.tar.gz(.sha256)  预编译 TUI
 # 打包时把该内核版本写回 config/bootstrap/hermes-version.env，安装包与源码固定版本保持一致。
-# 私有库与许可固定 URL/SHA256/大小。缺失时下载到 runtime/。已有缓存但 URL/SHA256/大小校验不通过时直接报错，也不会覆盖它。
+# 私有库与版权包固定 URL/SHA256/大小，缺失时下载到 runtime/，缓存损坏时中止且不覆盖。GPL 正文使用 config/licenses/ 本地文件。
 # 另外每次都联网核对 config/prompts/skills/fnos 是否为 fnnas-labs/fnos-cli-skill 最新 Release 且内容一致。
 #
 # 环境变量（可选）:
@@ -162,9 +162,10 @@ cache_native_asset() {
 # prepare_private_libatomic <arch>：产出 $WORK/private-lib-<arch>/{<LIB_SUBDIR>/libatomic.so.1,licenses/libatomic1/*}
 prepare_private_libatomic() {
     arch_vars "$1"
+    local gpl="$ROOT/config/licenses/GPL-3.0.txt"
+    verify_native_asset "$gpl" "$GPL3_SHA256" 35149 || die "缺少或损坏的 GPL 许可正文: $gpl"
     cache_native_asset "$LIBATOMIC_DEB" "$NATIVE_BASE/$LIBATOMIC_DEB" "$LIBATOMIC_SHA256" "$LIBATOMIC_SIZE"
     cache_native_asset "$GCC_BASE_DEB" "$NATIVE_BASE/$GCC_BASE_DEB" "$GCC_BASE_SHA256" "$GCC_BASE_SIZE"
-    cache_native_asset GPL-3.0.txt https://www.gnu.org/licenses/gpl-3.0.txt "$GPL3_SHA256" 35149
     local unpack="$WORK/libatomic-deb-$1" base="$WORK/gcc-base-deb-$1" out="$WORK/private-lib-$1"
     local copyright="$base/usr/share/doc/gcc-12-base/copyright"
     dpkg-deb --extract "$RUNTIME_DIR/$LIBATOMIC_DEB" "$unpack"
@@ -183,7 +184,7 @@ prepare_private_libatomic() {
     # Deliberately copy the real ELF, not Debian's libatomic.so.1 symlink.
     cp -- "$library" "$out/$LIB_SUBDIR/libatomic.so.1"
     cp -- "$copyright" "$out/licenses/libatomic1/copyright"
-    cp -- "$RUNTIME_DIR/GPL-3.0.txt" "$out/licenses/libatomic1/GPL-3.0.txt"
+    cp -- "$gpl" "$out/licenses/libatomic1/GPL-3.0.txt"
     printf 'libatomic1 / gcc-12-base %s %s\n%s/%s\nSHA256: %s\n%s/%s\nSHA256: %s\n' \
         "$NATIVE_VERSION" "$DEB_ARCH" "$NATIVE_BASE" "$LIBATOMIC_DEB" "$LIBATOMIC_SHA256" \
         "$NATIVE_BASE" "$GCC_BASE_DEB" "$GCC_BASE_SHA256" > "$out/licenses/libatomic1/origin.txt"

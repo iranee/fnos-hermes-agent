@@ -224,6 +224,11 @@ export function createKernelBootstrap({ appDir, dataDir, varDir, runtime, run })
       regular(path.join(root, relative));
     }
   }
+  // fnOS re-applies owner/ACL mode bits on the data share; git must not read those as local edits,
+  // otherwise `hermes update` autostashes thousands of mode-only changes and exits non-zero.
+  async function ignoreFileMode(ctx) {
+    await ctx.git(["config", "--local", "core.fileMode", "false"]);
+  }
   async function health(ctx) {
     const info = statSync(bootstrapPython); // A normal venv Python may itself be a symlink.
     if (!info.isFile() || !(info.mode & 0o111)) throw new Error("Bootstrap Python is not executable");
@@ -365,6 +370,7 @@ export function createKernelBootstrap({ appDir, dataDir, varDir, runtime, run })
     ctx.log(`Preparing permanent kernel generation ${id}; failures retain ${generationDir}`);
     await health(ctx);
     await ctx.git(["init", "--quiet", "."]);
+    await ignoreFileMode(ctx);
     await ctx.git(["remote", "add", "origin", ORIGIN]);
     await ctx.git(["fetch", "--no-tags", "origin", `refs/tags/${pinned.version}:refs/tags/${pinned.version}`]);
     for (const [ref, expected] of [[`refs/tags/${pinned.version}`, pinned.tag], ["FETCH_HEAD", pinned.tag],
@@ -387,6 +393,7 @@ export function createKernelBootstrap({ appDir, dataDir, varDir, runtime, run })
   async function complete(selected, options = {}) {
     const { actual, initial } = candidate(selected), ctx = job(initial, actual, options);
     await health(ctx);
+    await ignoreFileMode(ctx);
     const before = await identity(ctx, actual);
     await probe(ctx, actual, "pm");
     ctx.log("Running official source completion; caller must hold the maintenance window (config/skills migrations may occur)");
@@ -399,5 +406,10 @@ export function createKernelBootstrap({ appDir, dataDir, varDir, runtime, run })
     await health(ctx);
     return acceptance(ctx, actual);
   }
-  return { prepare, complete, verify };
+  // Existing checkouts never went through prepare(); settle them before `hermes update` runs.
+  async function prepareUpdate(selected, options = {}) {
+    const { actual, initial } = candidate(selected), ctx = job(initial, actual, options);
+    await ignoreFileMode(ctx);
+  }
+  return { prepare, complete, verify, prepareUpdate };
 }

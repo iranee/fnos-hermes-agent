@@ -333,7 +333,7 @@ export function createKernelUpdateJob({ dataDir, varDir, runtime, bootstrap, che
   try { directories(dataDir); directories(varDir); } catch { throw fail("storage-unsafe"); }
   dataDir = path.resolve(dataDir); varDir = path.resolve(varDir);
   if (![runtime?.resolve, runtime?.environment, runtime?.command, runtime?.prepareAdapter, runtime?.publishInitial,
-    bootstrap?.prepare, bootstrap?.complete, bootstrap?.verify, checker?.check,
+    bootstrap?.prepare, bootstrap?.complete, bootstrap?.verify, bootstrap?.prepareUpdate, checker?.check,
     networkProxy?.withEnvironment, services?.pause, services?.resume, run, log].every(x => typeof x === "function")) throw fail("invalid-options");
   const stateFile = path.join(varDir, "kernel-update-job.json"), logFile = path.join(varDir, "kernel-update-job.log");
   const lock = createLock(dataDir), redact = redactor();
@@ -728,6 +728,8 @@ export function createKernelUpdateJob({ dataDir, varDir, runtime, bootstrap, che
             if (completed?.ok !== true) throw fail("acceptance-failed");
           } else {
             phase("updating");
+            await bootstrap.prepareUpdate(selected, { env: environment(selected), signal, prepareEnvironment: metadata?.prepareEnvironment, log: append });
+            aborted(); unchanged(selected);
             const before = receiptFiles(dataDir), correlation = newId();
             const command = runtime.command(["update", "--yes", "--no-gateway-restart"], { selected });
             if (command.executable !== selected.launcher || command.cwd !== selected.root ||

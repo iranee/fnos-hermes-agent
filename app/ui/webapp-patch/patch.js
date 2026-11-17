@@ -6,7 +6,7 @@
   'use strict';
   if (window.__fnosWebappPatch) return;
 
-  const VERSION = '8';
+  const VERSION = '9';
   const TAG = '[fnos-webapp-patch]';
   const touchQuery = window.matchMedia ? window.matchMedia('(hover: none), (pointer: coarse)') : null;
   const narrowQuery = window.matchMedia ? window.matchMedia('(max-width: 639.98px)') : null;
@@ -278,6 +278,24 @@
       });
       box.appendChild(close);
     }
+    syncAttachMenus();
+  }
+  /* ---- 修补 6：v0.23.1 composer「+」附件菜单（context-menu.tsx）----
+     trigger 是 composer-root 内带 codicon-add 的 ghost 按钮，Radix 给它写 aria-controls 指向菜单 id。
+     关联后手机上放大约两成，并与模型菜单共用 touchend 单次点按。 */
+  const ATTACH_TRIGGER = '[data-slot="composer-root"] button[aria-haspopup="menu"][aria-controls]:has(> i.codicon-add)';
+  function syncAttachMenus() {
+    const menus = new Set();
+    if (browserHost()) {
+      for (const trigger of document.querySelectorAll(ATTACH_TRIGGER)) {
+        const menu = document.getElementById(trigger.getAttribute('aria-controls'));
+        if (menu?.matches('[data-slot="dropdown-menu-content"][role="menu"]')) menus.add(menu);
+      }
+    }
+    for (const menu of document.querySelectorAll('[data-fnos-attach-menu]')) {
+      if (!menus.has(menu)) menu.removeAttribute('data-fnos-attach-menu');
+    }
+    for (const menu of menus) if (!menu.hasAttribute('data-fnos-attach-menu')) menu.setAttribute('data-fnos-attach-menu', '');
   }
   narrowQuery?.addEventListener?.('change', syncModelPills);
   new MutationObserver(syncModelPills).observe(document.documentElement, {
@@ -287,7 +305,7 @@
   syncModelPills();
   // iPhone Safari 会丢掉模型菜单里单次点按的合成 click（长按仍可用），上游只给对话输入框补了 touchend 聚焦。
   // 菜单内的短点按改在 touchend 里直接激活，并取消浏览器随后的合成鼠标事件，安卓上不会重复触发。
-  const MODEL_MENUS = '[data-fnos-model-menu], [data-fnos-model-submenu]';
+  const MODEL_MENUS = '[data-fnos-model-menu], [data-fnos-model-submenu], [data-fnos-attach-menu]';
   const TAP_MOVE_PX = 10;
   let menuTap = null;
   const tapMoved = (from, touch) => Math.hypot(touch.clientX - from.x, touch.clientY - from.y) > TAP_MOVE_PX;
@@ -309,14 +327,17 @@
     if (!began || !touch || event.touches.length || event.defaultPrevented) return;
     if (tapMoved(began, touch) || event.timeStamp - began.at > 500) return;
     const menu = began.target.closest(MODEL_MENUS);
-    const input = began.target.closest('input');
+    if (!menu?.isConnected) return;
+    // 搜索行的空白处也算点中输入框，点按不再落到菜单后面的对话输入框。
+    const searchRow = began.target.closest('[data-slot="dropdown-menu-search"]');
+    const input = began.target.closest('input') || (searchRow && !began.target.closest('button') ? searchRow.querySelector(':scope > input') : null);
     const control = input || began.target.closest('button, [role^="menuitem"]');
-    if (!menu?.isConnected || !control || !menu.contains(control)) return;
-    if (control.matches(':disabled, [aria-disabled="true"], [data-disabled]')) return;
+    if (!control || !menu.contains(control)) { event.preventDefault(); return; }
+    if (control.matches(':disabled, [aria-disabled="true"], [data-disabled]')) { event.preventDefault(); return; }
     // 已聚焦的输入框交给浏览器移动光标。
     if (input && document.activeElement === input) return;
     const hit = document.elementFromPoint(touch.clientX, touch.clientY);
-    if (!hit || !control.contains(hit)) return;
+    if (!hit || !(control.contains(hit) || (input && searchRow?.contains(hit)))) return;
     event.preventDefault();
     if (input) { input.focus(); return; }
     control.click();

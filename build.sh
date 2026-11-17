@@ -7,10 +7,9 @@
 #        ./build.sh --no-bump       # 沿用 manifest 当前版本号
 #        ./build.sh --version 0.23.1-022   # 换内核版本时必须指定
 #        ./build.sh --check-only    # 校验源码/TUI、私有库/许可与 fnos-cli Skill，不写版本、不打包
-#        ./build.sh --arch x86_64,aarch64   # 同时出 x86 与 ARM 两个包（GitHub 发布用），本地默认只打 x86_64
 #
-# 输出: dist/fnos-<app>_v<版本>_x86_64.fpk（platform=x86），带 aarch64 时另出 dist/fnos-<app>_v<版本>_arm64.fpk（platform=arm），
-#   各带对应架构的私有 libatomic。不出 platform=all 混合包。
+# 输出: dist/fnos-<app>_v<版本>_all.fpk（platform=all），x86_64 与 ARM（aarch64）设备共用这一个包。
+#   包内同时带 lib/x64 与 lib/arm64 两份私有 libatomic，设备上按 uname -m 选用。
 #
 # 版本号规则: <内核版本>-<序号>，从 102 起每次打包 +1，不按日期重置。
 #   例: 0.23.0-122 → 0.23.0-123；换内核到 0.23.1 后手动指定 0.23.1-022，再往后自动 +1。
@@ -29,7 +28,6 @@
 # 另外每次都联网核对 config/prompts/skills/fnos 是否为 fnnas-labs/fnos-cli-skill 最新 Release 且内容一致。
 #
 # 环境变量（可选）:
-#   FPK_ARCHES      逗号分隔的目标架构，默认 x86_64（同 --arch，amd64/arm64 为别名）
 #   SKIP_SKILL_CHECK=1  GitHub 不可达时跳过 fnos-cli Skill 最新性校验（版本落后/内容不符仍会中止）
 # =============================================================================
 set -euo pipefail
@@ -39,9 +37,8 @@ RUNTIME_DIR="$ROOT/runtime"
 DIST_DIR="$ROOT/dist"
 
 FNPACK_VERSION=1.2.3
-# 每个包只含一种架构的私有 ELF，所以按架构分别出包，不标为 platform=all。
-ARCH_SPEC="${FPK_ARCHES:-x86_64}"
-ARCHES=()
+# 一个包里同时放这两种架构的私有 ELF，manifest 标为 platform=all。
+ARCHES=(x86_64 aarch64)
 
 info()  { printf '\033[0;32m[INFO]\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m[WARN]\033[0m %s\n' "$*"; }
@@ -57,25 +54,10 @@ while [[ $# -gt 0 ]]; do
         --version) VERSION_OVERRIDE="${2:?--version 需要参数}"; BUMP=0; shift 2 ;;
         --version=*) VERSION_OVERRIDE="${1#*=}"; BUMP=0; shift ;;
         --check-only) CHECK_ONLY=1; shift ;;
-        --arch) ARCH_SPEC="${2:?--arch 需要参数：x86_64 或 aarch64}"; shift 2 ;;
-        --arch=*) ARCH_SPEC="${1#*=}"; shift ;;
-        -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
         *) die "未知参数: $1" ;;
     esac
 done
-
-# 在下载、版本写入之前拒绝不支持的目标，包括 all/both 混合包。
-IFS=', ' read -r -a _arch_in <<< "$ARCH_SPEC"
-for a in "${_arch_in[@]}"; do
-    [[ -n "$a" ]] || continue
-    case "$a" in
-        x86_64|amd64) a=x86_64 ;;
-        aarch64|arm64) a=aarch64 ;;
-        *) die "不支持的目标架构: $a；只支持 x86_64(amd64) 与 aarch64(arm64)，不出 platform=all 混合包" ;;
-    esac
-    [[ " ${ARCHES[*]} " == *" $a "* ]] || ARCHES+=("$a")
-done
-[[ ${#ARCHES[@]} -gt 0 ]] || die "--arch / FPK_ARCHES 未给出任何有效架构"
 
 [[ "$(uname -s)" == Linux ]] || die "本脚本只能在 Linux（或 WSL）里运行，不要在 Windows 下打包"
 for tool in curl tar sha256sum cut sed date mktemp cmp find diff dpkg-deb stat od tr ln python3; do
@@ -83,7 +65,7 @@ for tool in curl tar sha256sum cut sed date mktemp cmp find diff dpkg-deb stat o
 done
 HOST_ARCH=$(uname -m)
 case "$HOST_ARCH" in x86_64|aarch64) ;; *) die "不支持的构建主机架构: $HOST_ARCH" ;; esac
-info "目标架构: ${ARCHES[*]}（每个架构单独出包，各带对应架构私有 libatomic）"
+info "目标架构: ${ARCHES[*]}（同一个包，platform=all，带两种架构的私有 libatomic）"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/hermes-fpk-build.XXXXXX")
 CACHE_WORK=""
@@ -117,15 +99,15 @@ NATIVE_VERSION=12.2.0-14+deb12u1
 NATIVE_BASE=https://deb.debian.org/debian/pool/main/g/gcc-12
 GPL3_SHA256=3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986
 
-# arch_vars <x86_64|aarch64>：设置该架构的 deb、ELF 机器码、包内库目录（与 Node process.arch 同名）和 manifest platform。
+# arch_vars <x86_64|aarch64>：设置该架构的 deb、ELF 机器码和包内库目录（与 Node process.arch 同名）。
 arch_vars() {
     case "$1" in
         x86_64)
-            DEB_ARCH=amd64; LIB_TRIPLET=x86_64-linux-gnu; ELF_MACHINE=3e00; LIB_SUBDIR=x64; MANIFEST_PLATFORM=x86
+            DEB_ARCH=amd64; LIB_TRIPLET=x86_64-linux-gnu; ELF_MACHINE=3e00; LIB_SUBDIR=x64
             LIBATOMIC_SHA256=fbd4e154a6b444229ea002cc209df099209c0adc09102e5fd21239a3d2b55e2d; LIBATOMIC_SIZE=9376
             GCC_BASE_SHA256=1896a2aacf4ad681ff5eacc24a5b0ca4d5d9c9b9c9e4b6de5197bc1e116ea619; GCC_BASE_SIZE=37596 ;;
         aarch64)
-            DEB_ARCH=arm64; LIB_TRIPLET=aarch64-linux-gnu; ELF_MACHINE=b700; LIB_SUBDIR=arm64; MANIFEST_PLATFORM=arm
+            DEB_ARCH=arm64; LIB_TRIPLET=aarch64-linux-gnu; ELF_MACHINE=b700; LIB_SUBDIR=arm64
             LIBATOMIC_SHA256=1693aa13ce2b30d061a519fc28b77b9bab8c8e45804ced5969d99821e1bc2159; LIBATOMIC_SIZE=9568
             GCC_BASE_SHA256=674cf6cba6d432bd200c45fe866c1652c7a53523cc2e7a613e05bc4abf7b5440; GCC_BASE_SIZE=37624 ;;
         *) die "内部错误：未知架构 $1" ;;
@@ -133,14 +115,8 @@ arch_vars() {
     LIBATOMIC_DEB="libatomic1_${NATIVE_VERSION}_${DEB_ARCH}.deb"
     GCC_BASE_DEB="gcc-12-base_${NATIVE_VERSION}_${DEB_ARCH}.deb"
 }
-# 文件名后缀：x86 包用 _x86_64，ARM 包用 _arm64。
-# 120–122 的客户端只认 _amd64/_arm64，会把 _x86_64 当作无后缀通用包，x86 设备仍拿到正确的包。
-fpk_name() {
-    arch_vars "$1"
-    local suffix=$DEB_ARCH
-    [[ "$suffix" != amd64 ]] || suffix=x86_64
-    printf 'fnos-%s_v%s_%s.fpk' "$APP_NAME" "$VERSION" "$suffix"
-}
+# 已安装的旧版本检查更新时只认 _x86_64/_amd64/_arm64 后缀，_all 会被当作不分架构的通用包，两种设备都能拿到。
+fpk_name() { printf 'fnos-%s_v%s_all.fpk' "$APP_NAME" "$VERSION"; }
 
 verify_native_asset() {
     [[ ! -L "$1" && -f "$1" ]] && [[ "$(stat -c %s -- "$1")" == "$3" ]] && verify_sha256 "$1" "$2"
@@ -159,14 +135,14 @@ cache_native_asset() {
     fi
     info "私有库/许可缓存校验通过: $name"
 }
-# prepare_private_libatomic <arch>：产出 $WORK/private-lib-<arch>/{<LIB_SUBDIR>/libatomic.so.1,licenses/libatomic1/*}
+# prepare_private_libatomic <arch>：往 $WORK/private-lib/ 里加 <LIB_SUBDIR>/libatomic.so.1，许可文件放 licenses/libatomic1/（两个架构共用）
 prepare_private_libatomic() {
     arch_vars "$1"
     local gpl="$ROOT/config/licenses/GPL-3.0.txt"
     verify_native_asset "$gpl" "$GPL3_SHA256" 35149 || die "缺少或损坏的 GPL 许可正文: $gpl"
     cache_native_asset "$LIBATOMIC_DEB" "$NATIVE_BASE/$LIBATOMIC_DEB" "$LIBATOMIC_SHA256" "$LIBATOMIC_SIZE"
     cache_native_asset "$GCC_BASE_DEB" "$NATIVE_BASE/$GCC_BASE_DEB" "$GCC_BASE_SHA256" "$GCC_BASE_SIZE"
-    local unpack="$WORK/libatomic-deb-$1" base="$WORK/gcc-base-deb-$1" out="$WORK/private-lib-$1"
+    local unpack="$WORK/libatomic-deb-$1" base="$WORK/gcc-base-deb-$1" out="$WORK/private-lib"
     local copyright="$base/usr/share/doc/gcc-12-base/copyright"
     dpkg-deb --extract "$RUNTIME_DIR/$LIBATOMIC_DEB" "$unpack"
     dpkg-deb --extract "$RUNTIME_DIR/$GCC_BASE_DEB" "$base"
@@ -183,11 +159,16 @@ prepare_private_libatomic() {
     mkdir -p -- "$out/$LIB_SUBDIR" "$out/licenses/libatomic1"
     # Deliberately copy the real ELF, not Debian's libatomic.so.1 symlink.
     cp -- "$library" "$out/$LIB_SUBDIR/libatomic.so.1"
-    cp -- "$copyright" "$out/licenses/libatomic1/copyright"
-    cp -- "$gpl" "$out/licenses/libatomic1/GPL-3.0.txt"
+    # 包内只放一份版权正文，两个架构的内容不同就中止，不悄悄丢掉其中一份。
+    if [[ -e "$out/licenses/libatomic1/copyright" ]]; then
+        cmp -s -- "$copyright" "$out/licenses/libatomic1/copyright" || die "$1 的 gcc-12-base 版权正文与其他架构不一致"
+    else
+        cp -- "$copyright" "$out/licenses/libatomic1/copyright"
+        cp -- "$gpl" "$out/licenses/libatomic1/GPL-3.0.txt"
+    fi
     printf 'libatomic1 / gcc-12-base %s %s\n%s/%s\nSHA256: %s\n%s/%s\nSHA256: %s\n' \
         "$NATIVE_VERSION" "$DEB_ARCH" "$NATIVE_BASE" "$LIBATOMIC_DEB" "$LIBATOMIC_SHA256" \
-        "$NATIVE_BASE" "$GCC_BASE_DEB" "$GCC_BASE_SHA256" > "$out/licenses/libatomic1/origin.txt"
+        "$NATIVE_BASE" "$GCC_BASE_DEB" "$GCC_BASE_SHA256" >> "$out/licenses/libatomic1/origin.txt"
 }
 
 manifest_get() { sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" "$ROOT/manifest" | head -1 | tr -d '\r"'; }
@@ -248,11 +229,9 @@ else
     VERSION="$CURRENT_VERSION"
 fi
 info "本次版本: $VERSION"
+FPK_NAME=$(fpk_name)
 if [[ "$CHECK_ONLY" != 1 ]]; then
-    for a in "${ARCHES[@]}"; do
-        name=$(fpk_name "$a")
-        [[ ! -e "$DIST_DIR/$name" && ! -e "$DIST_DIR/$name.sha256" ]] || die "安装包已存在，不覆盖旧包：$name"
-    done
+    [[ ! -e "$DIST_DIR/$FPK_NAME" && ! -e "$DIST_DIR/$FPK_NAME.sha256" ]] || die "安装包已存在，不覆盖旧包：$FPK_NAME"
 fi
 
 # -----------------------------------------------------------------------------
@@ -329,7 +308,7 @@ PY
 info "TUI 校验通过: $(basename -- "$TUI_ARCHIVE")"
 
 # -----------------------------------------------------------------------------
-step "4c. 校验各目标架构私有 libatomic 与许可资产"
+step "4c. 校验两种架构的私有 libatomic 与许可资产"
 # -----------------------------------------------------------------------------
 for a in "${ARCHES[@]}"; do prepare_private_libatomic "$a"; done
 
@@ -468,31 +447,26 @@ chmod 755 -- "$STAGE"/cmd/* "$STAGE"/app/bin/*
 grep -qx "APP_VERSION=$VERSION" "$BOOT/app-version.env" || die "打包目录内 app-version.env 版本不符"
 
 # -----------------------------------------------------------------------------
-step "8. 按架构 fnpack build 并输出到 dist/"
+step "8. fnpack build 并输出到 dist/"
 # -----------------------------------------------------------------------------
 mkdir -p -- "$DIST_DIR"
-BUILT=()
-for a in "${ARCHES[@]}"; do
-    arch_vars "$a"
-    ARCH_STAGE="$WORK/stage-$a"
-    cp -a -- "$STAGE" "$ARCH_STAGE"
-    mv -- "$WORK/private-lib-$a" "$ARCH_STAGE/app/lib"
-    # platform 跟随该包的私有 ELF 架构（fnOS 合法值 x86 / arm），源码 manifest 不改。
-    for m in "$ARCH_STAGE/manifest" "$ARCH_STAGE/app/manifest"; do
-        sed -i "s/^platform[[:space:]]*=.*/platform              = $MANIFEST_PLATFORM/" "$m"
-        grep -qE "^platform[[:space:]]*=[[:space:]]*$MANIFEST_PLATFORM\$" "$m" || die "manifest platform 写入失败: $m"
-    done
-    find "$ARCH_STAGE" -type d -exec chmod 755 {} +
-    if [[ -n "$(find "$ARCH_STAGE" -perm /022 -print -quit)" ]]; then
-        die "临时打包文件系统未保留 Unix 权限；请将 TMPDIR 指向 Linux 文件系统"
-    fi
-    info "[$a] 打包目录大小: $(du -sh -- "$ARCH_STAGE" | cut -f1)（platform=$MANIFEST_PLATFORM，lib/$LIB_SUBDIR）"
-    OUT="$WORK/out-$a"
-    mkdir -p -- "$OUT"
-    (cd -- "$OUT" && "$FNPACK" build --directory "$ARCH_STAGE") || die "[$a] fnpack 构建失败"
-    RAW_FPK=$(find "$OUT" -maxdepth 1 -name '*.fpk' -print -quit)
-    [[ -n "$RAW_FPK" ]] || die "[$a] fnpack 没有生成 .fpk"
-    python3 -B - "$ROOT" "$RAW_FPK" "$ARCH_STAGE" "$WORK" <<'PY'
+mv -- "$WORK/private-lib" "$STAGE/app/lib"
+# 包里带两种架构的私有 ELF，platform 固定写 all（fnOS 合法值 x86 / arm / all）。
+for m in "$STAGE/manifest" "$STAGE/app/manifest"; do
+    sed -i "s/^platform[[:space:]]*=.*/platform              = all/" "$m"
+    grep -qE '^platform[[:space:]]*=[[:space:]]*all$' "$m" || die "manifest platform 写入失败: $m"
+done
+find "$STAGE" -type d -exec chmod 755 {} +
+if [[ -n "$(find "$STAGE" -perm /022 -print -quit)" ]]; then
+    die "临时打包文件系统未保留 Unix 权限；请将 TMPDIR 指向 Linux 文件系统"
+fi
+info "打包目录大小: $(du -sh -- "$STAGE" | cut -f1)（platform=all，lib/x64 + lib/arm64）"
+OUT="$WORK/out"
+mkdir -p -- "$OUT"
+(cd -- "$OUT" && "$FNPACK" build --directory "$STAGE") || die "fnpack 构建失败"
+RAW_FPK=$(find "$OUT" -maxdepth 1 -name '*.fpk' -print -quit)
+[[ -n "$RAW_FPK" ]] || die "fnpack 没有生成 .fpk"
+python3 -B - "$ROOT" "$RAW_FPK" "$STAGE" "$WORK" <<'PY'
 import importlib.util, json, sys
 from pathlib import Path
 spec = importlib.util.spec_from_file_location('build_fpk', Path(sys.argv[1]) / 'scripts/build-fpk.py')
@@ -500,27 +474,20 @@ build = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(build)
 print(json.dumps(build.verify_fpk(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]), stage_modes=True)))
 PY
-    FPK_NAME=$(fpk_name "$a")
-    [[ ! -e "$DIST_DIR/$FPK_NAME" && ! -e "$DIST_DIR/$FPK_NAME.sha256" ]] || die "安装包或 SHA256 文件已存在，不覆盖：$FPK_NAME"
-    ln -T -- "$RAW_FPK" "$DIST_DIR/$FPK_NAME" 2>/dev/null || {
-        python3 -B - "$RAW_FPK" "$DIST_DIR/$FPK_NAME" <<'PY'
+[[ ! -e "$DIST_DIR/$FPK_NAME" && ! -e "$DIST_DIR/$FPK_NAME.sha256" ]] || die "安装包或 SHA256 文件已存在，不覆盖：$FPK_NAME"
+ln -T -- "$RAW_FPK" "$DIST_DIR/$FPK_NAME" 2>/dev/null || {
+    python3 -B - "$RAW_FPK" "$DIST_DIR/$FPK_NAME" <<'PY'
 import shutil, sys
 with open(sys.argv[1], 'rb') as source, open(sys.argv[2], 'xb') as target:
     shutil.copyfileobj(source, target)
 PY
-    }
-    FPK_SHA=$(sha256_of "$DIST_DIR/$FPK_NAME")
-    ( set -o noclobber; printf '%s  %s\n' "$FPK_SHA" "$FPK_NAME" > "$DIST_DIR/$FPK_NAME.sha256" )
-    BUILT+=("$FPK_NAME|$MANIFEST_PLATFORM|$FPK_SHA")
-    rm -rf -- "$ARCH_STAGE" "$OUT"
-done
+}
+FPK_SHA=$(sha256_of "$DIST_DIR/$FPK_NAME")
+( set -o noclobber; printf '%s  %s\n' "$FPK_SHA" "$FPK_NAME" > "$DIST_DIR/$FPK_NAME.sha256" )
 
 echo
 info "=========================================="
 info "  构建完成（版本 $VERSION，下次打包自动 +1）"
-for entry in "${BUILT[@]}"; do
-    IFS='|' read -r name platform digest <<< "$entry"
-    info "  文件:   $DIST_DIR/$name（platform=$platform，$(du -h -- "$DIST_DIR/$name" | cut -f1)）"
-    info "  SHA256: $digest"
-done
+info "  文件:   $DIST_DIR/$FPK_NAME（platform=all，$(du -h -- "$DIST_DIR/$FPK_NAME" | cut -f1)）"
+info "  SHA256: $FPK_SHA"
 info "=========================================="

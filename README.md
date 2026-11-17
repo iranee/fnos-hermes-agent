@@ -6,10 +6,6 @@
 
 Hermes Agent 是专为适配飞牛 NAS（fnOS）的 AI 助手应用，通过原生`fpk` 应用中心部署。采用基于 Node.js 的 Monitor 服务进行进程管理，提供基于 Web 的控制面板用于配置和对话交互。
 
-## 更新提醒
-* 我们有另一个全新的版本，支持对话中选择专家团+工作流等，功能更多：https://github.com/veenyi/fnos-hermes-agent
-* 本项目不定期更新，也可能只留存长期稳定版本
-
 ## 新版亮点
 
 这一版的对话页换成了 Hermes 上游官方 WebApp，管理面板只负责配置、服务和更新。
@@ -32,7 +28,7 @@ Hermes Agent 是专为适配飞牛 NAS（fnOS）的 AI 助手应用，通过原�
 
 ### 环境要求
 
-- 设备架构：x86_64（Intel/AMD）用 `x86_64.fpk`；ARM（aarch64）设备用 GitHub Release 中的 `arm64.fpk`
+- 设备架构：支持 x86_64（Intel/AMD）和 ARM（aarch64）
 - 可用存储空间：约 1GB（含 Python 依赖包和缓存）
 - 依赖项：fnOS 官方 Node.js v26 或更新版本（安装时由应用中心自动处理）
 - 网络：安装/升级时需联网下载 Python 运行时与依赖包

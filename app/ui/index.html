@@ -179,7 +179,7 @@
     .nav-item.active{background:var(--blue-bg);color:var(--blue)}
     .nav-item svg{width:18px;height:18px;flex-shrink:0}
     .nav-label{font-size:13px;font-weight:500}
-    .nav-item:disabled{opacity:.5;cursor:wait}
+    .nav-item:disabled{opacity:.5;cursor:wait;background:transparent}
     .service-error{color:var(--red);font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;-webkit-user-select:text}
     .service-error:empty{display:none}
     .ui-notice{display:flex;align-items:flex-start;gap:8px;padding:10px 12px;margin:8px 0;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg2);color:var(--text2);font-size:12px;line-height:1.7;overflow-wrap:anywhere;white-space:pre-line}
@@ -274,7 +274,7 @@
     #kernelTaskPanel[hidden],.upd-steps[hidden],.upd-facts[hidden]{display:none}
     .app-check-meta{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:10px;font-size:11px;color:var(--text3);line-height:1.6}
     .app-check-meta[hidden]{display:none}
-    .app-check-meta .is-exhausted{color:var(--orange)}
+    .app-check-meta #appForceQuota{color:var(--orange)}
     .app-tools{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap;justify-content:flex-end}
     .app-tools .qq-group-wrap{margin-left:0}
     /* 与右侧 tb-rocker 等高（3px 内边距 + 26px 按键 = 32px），同一圆角 */
@@ -417,7 +417,10 @@
     .svc-d-val{overflow-wrap:anywhere;min-width:0}
     #sysInfoSvcBody .svc-d-item{flex-wrap:wrap;row-gap:2px;min-width:0}
     .upd-ver-build{margin-top:3px;font-family:"SF Mono","Cascadia Code",Consolas,monospace;font-size:11px;color:var(--text3);overflow-wrap:anywhere}
-    .upd-ver-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;min-height:18px}
+    .upd-ver-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:4px 8px;margin-bottom:4px;min-height:18px}
+    .upd-ver-head>span:first-child{white-space:nowrap}
+    /* 版本号和状态词各自成段，只在「 · 」处换行，不把“暂无更新”拆成两行 */
+    #appCurrentVer,#appLatestVer,#updateCurrentVer,#updateLatestVer{word-break:keep-all;overflow-wrap:anywhere}
     .upd-gap{display:inline-flex;align-items:center;padding:1px 8px;border-radius:9px;font-size:11px;font-weight:600;line-height:16px;white-space:nowrap;
       color:var(--accent);background:var(--accent-bg);border:1px solid var(--accent-border);font-variant-numeric:tabular-nums}
     .upd-gap[hidden]{display:none}
@@ -1786,9 +1789,42 @@
     return '服务异常，详情见日志';
   }
   var _lastRawErrors = new Map();
+  // 内核维护期间服务端对所有接口返回同一条提示：日志只记一条，并停用依赖内核的页面入口。
+  var KERNEL_MAINTENANCE_TEXT = '内核维护中，请在更新页面查看进度';
+  var _maintenanceSources = new Set(), _maintenanceLogged = false;
+  function kernelMaintenance(){ return _maintenanceSources.size > 0 || !!kernelRunning(); }
+  function maintenanceLabel(){ return kernelRunning() && kernelTask.job.action === 'initialize' ? '正在构建更新环境' : '正在升级内核'; }
+  function syncMaintenanceNav(){
+    var busy = kernelMaintenance(), title = busy ? maintenanceLabel() + '，完成后可用' : '';
+    if(!busy) _maintenanceLogged = false;
+    ['models', 'channels'].forEach(function(view){
+      var nav = document.querySelector('.nav-item[data-view="' + view + '"]');
+      setDisabled(nav, busy);
+      if(nav.title !== title) nav.title = title;
+    });
+    var shown = document.querySelector('.view.active');
+    if(busy && shown && (shown.id === 'viewModels' || shown.id === 'viewChannels')){
+      // 临时转到更新页，不覆盖已记住的页面
+      window.__deepLinked = true;
+      switchView('update');
+    }
+  }
   function logRawError(label, message){
-    if(!message){ _lastRawErrors.delete(label); return; }
-    var text = redactDiagnostic(message);
+    var text = message ? redactDiagnostic(message) : '';
+    // 与 serviceFault 一致，只认 503 的原文；其它状态码或带后缀的文本仍按真实错误记录。
+    if(text === KERNEL_MAINTENANCE_TEXT || text === 'HTTP 503 · ' + KERNEL_MAINTENANCE_TEXT){
+      _lastRawErrors.delete(label);
+      _maintenanceSources.add(label);
+      if(!_maintenanceLogged){
+        _maintenanceLogged = true;
+        panelLog(maintenanceLabel() + '，相关服务暂时停用；可在更新页面查看进度。', 'info');
+      }
+      syncMaintenanceNav();
+      return;
+    }
+    // 维护闸门对所有接口同时生效：任一来源不再返回维护提示，即说明维护已结束。
+    if(_maintenanceSources.has(label)){ _maintenanceSources.clear(); syncMaintenanceNav(); }
+    if(!text){ _lastRawErrors.delete(label); return; }
     if(_lastRawErrors.get(label) === text) return;
     _lastRawErrors.set(label, text);
     if(label === 'kernel:check' && /GitHub.*(?:rate limit|限流)|(?:rate limit|限流).*GitHub/i.test(text)){
@@ -4024,6 +4060,11 @@
     kernelEl('updLogCopy').hidden = !kernelLogOutput();
     kernelEl('updLogFollowControl').hidden = kernelEl('kernelTaskPanel').hidden;
     renderKernelDetails(!kernelTask.selectedRun || (job && kernelTask.selectedRun === job.id) ? job : null);
+    // 成功结果已由全部打勾的步骤条表示；步骤有缺失或未确认时仍保留文字。
+    var steps = kernelEl('updKernelSteps');
+    if(job && job.state === 'succeeded' && !kernelTask.submitting && !kernelTask.statusError && !steps.hidden &&
+        Array.prototype.every.call(steps.children, function(step){ return step.dataset.state === 'complete'; })) kernelEl('kernelJobState').hidden = true;
+    syncMaintenanceNav();
     renderUpdateProxy();
     renderKernelChannel();
   }
@@ -5136,23 +5177,20 @@
     var quotaEl = document.getElementById('appForceQuota');
     if (!box || !lastEl || !quotaEl) return;
     var hasLast = !!(d && typeof d.last_latest === 'string' && d.last_latest.trim() && d.last_latest !== 'unknown');
-    var hasQuota = !!(d && typeof d.force_limit === 'number' && typeof d.force_remaining === 'number' && d.force_limit > 0);
-    if (!hasLast && !hasQuota) { box.hidden = true; return; }
+    // 剩余次数不展示，只在用完时提示恢复时间。
+    var exhausted = !!(d && typeof d.force_limit === 'number' && typeof d.force_remaining === 'number' && d.force_limit > 0 && Math.floor(d.force_remaining) <= 0);
+    if (!hasLast && !exhausted) { box.hidden = true; return; }
     var when = function(ms, opts){ var t = Number(ms); return isFinite(t) && t > 0 ? new Date(t).toLocaleString([], opts) : ''; };
     if (hasLast) {
       var at = when(d.last_checked_at, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
       lastEl.textContent = '最后检测到 v' + d.last_latest.replace(/^v/i, '') + (at ? '（' + at + '）' : '');
     }
     lastEl.hidden = !hasLast;
-    if (hasQuota) {
-      var remaining = Math.max(0, Math.min(d.force_limit, Math.floor(d.force_remaining)));
+    if (exhausted) {
       var reset = when(d.force_reset_at, { hour: '2-digit', minute: '2-digit' });
-      quotaEl.textContent = remaining > 0
-        ? '本小时还可主动检测 ' + remaining + ' 次（上限 ' + d.force_limit + ' 次）'
-        : '本小时主动检测已用完' + (reset ? '，' + reset + ' 后恢复' : '');
-      quotaEl.classList.toggle('is-exhausted', remaining === 0);
+      quotaEl.textContent = '本小时主动检测已用完' + (reset ? '，' + reset + ' 后恢复' : '');
     }
-    quotaEl.hidden = !hasQuota;
+    quotaEl.hidden = !exhausted;
     box.hidden = false;
   }
   async function initVersionChip(force){

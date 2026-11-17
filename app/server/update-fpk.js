@@ -32,7 +32,7 @@ export function compareVersions(a, b) {
 
 /**
  * 从 GitHub release 的 assets 列表中提取 .fpk 安装包下载直链。
- * 优先本机架构的 _x86_64/_arm64 包（也认旧发布的 _amd64）。其次不带架构后缀的旧包（no_trimcli 优先），
+ * 优先本机架构的 _x86_64/_arm64 包（也认旧发布的 _amd64）。其次两种架构通用的包（_all 或不带架构后缀，no_trimcli 优先），
  * 只有其他架构的包时返回 ""，避免把不可安装的包当作下载链接。
  * @param {Array} assets GitHub release assets
  * @param {string} arch Node process.arch

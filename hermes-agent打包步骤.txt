@@ -4,7 +4,7 @@
 #     bash hermes-agent打包步骤.txt
 #
 # 流程：检查工具 → 检查网络和令牌 → 没有内核运行时就先构建（从官方正式版里选）
-#       → 校验 → 汇总检测结果，按回车后正式打包 → 列出安装包。安装包在 dist/，默认只打 x86_64。
+#       → 校验 → 汇总检测结果，按回车后正式打包 → 列出安装包。安装包在 dist/，x86_64 和 ARM 设备共用一个包。
 #
 # 新机器第一次运行前先装好（Debian/Ubuntu）：
 #   sudo apt install -y git curl python3 tar coreutils dpkg
@@ -22,7 +22,6 @@
 #   REBUILD_CORE=1                       已有内核运行时也重新选择版本并构建
 #   ALLOW_OLDER=1                        允许选比当前固定版本更旧的内核
 #   PKG_VERSION=0.23.1-032               指定安装包版本号；换了内核版本时必须填写
-#   FPK_ARCHES=x86_64,aarch64            同时打 ARM 包
 #   SKIP_SKILL_CHECK=1                   GitHub 不可达时跳过 fnos-cli Skill 最新版核对
 #   ASSUME_YES=1                         校验通过后不等按键，直接打包（没有终端时必须设）
 #
@@ -154,7 +153,7 @@ printf '  内核运行时        %s（源码包、TUI 的 SHA256 已校验）\n'
 printf '  私有库与许可      已校验\n'
 printf '  fnos-cli Skill    %s\n' "${skill_line#fnos-cli Skill }"
 printf '  本次安装包版本    %s\n' "${next_version:-未知}"
-printf '  目标架构          %s\n' "${FPK_ARCHES:-x86_64}"
+printf '  目标架构          x86_64 与 ARM（aarch64）通用，platform=all\n'
 if [[ "${ASSUME_YES:-0}" == 1 ]]; then
     info "ASSUME_YES=1，直接开始正式打包"
 elif [[ -t 0 ]]; then

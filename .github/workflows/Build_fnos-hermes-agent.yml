@@ -13,7 +13,7 @@ on:
         type: string
   push:
     tags:
-      - 'fnos-hermes-agent_v*'
+      - 'v*'
 
 permissions:
   contents: read
@@ -78,7 +78,7 @@ jobs:
               raise SystemExit(f'Application version must be {prefix}-<serial>, got {version}')
           if app.get('APP_VERSION') != manifest['version']:
               raise SystemExit('manifest and app-version.env disagree')
-          tag = 'fnos-hermes-agent_v' + version
+          tag = 'v' + version
           if os.environ['GITHUB_EVENT_NAME'] == 'push' and os.environ['GITHUB_REF'] != 'refs/tags/' + tag:
               raise SystemExit('Pushed tag must match manifest version')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
@@ -123,8 +123,8 @@ jobs:
         env:
           BUILD_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          bash build.sh --version "$BUILD_VERSION" --arch x86_64,aarch64
-          (cd dist && for a in x86_64 arm64; do sha256sum --check "fnos-hermes-agent_v${BUILD_VERSION}_$a.fpk.sha256"; done)
+          bash build.sh --version "$BUILD_VERSION"
+          (cd dist && sha256sum --check "fnos-hermes-agent_v${BUILD_VERSION}_all.fpk.sha256")
       - name: Extract release notes from CHANGELOG.md
         id: notes
         env:
@@ -139,17 +139,15 @@ jobs:
           text = changelog.read_text(encoding='utf-8') if changelog.is_file() else ''
           match = re.search(r'^## ' + re.escape(version) + r'(?:[ （(][^\n]*)?\n(.*?)(?=^## |\Z)', text, re.M | re.S)
           body = match.group(1).strip() if match else ''
-          footer = '安装包：_x86_64 适用于 x86_64（Intel/AMD）设备，_arm64 适用于 ARM（aarch64）设备。内置 Hermes 内核 ' + os.environ['NOTES_CORE'] + '，运行环境在安装时联网下载，不含可选备份模块。'
+          footer = '安装包：x86_64（Intel/AMD）与 ARM（aarch64）设备通用同一个包。内置 Hermes 内核 ' + os.environ['NOTES_CORE'] + '，运行环境在安装时联网下载，不含可选备份模块。'
           Path('dist/release-notes.md').write_text((body + '\n\n' if body else '') + footer + '\n', encoding='utf-8')
           PY
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: fnos-hermes-agent-${{ steps.version.outputs.version }}
           path: |
-            dist/fnos-hermes-agent_v${{ steps.version.outputs.version }}_x86_64.fpk
-            dist/fnos-hermes-agent_v${{ steps.version.outputs.version }}_x86_64.fpk.sha256
-            dist/fnos-hermes-agent_v${{ steps.version.outputs.version }}_arm64.fpk
-            dist/fnos-hermes-agent_v${{ steps.version.outputs.version }}_arm64.fpk.sha256
+            dist/fnos-hermes-agent_v${{ steps.version.outputs.version }}_all.fpk
+            dist/fnos-hermes-agent_v${{ steps.version.outputs.version }}_all.fpk.sha256
             dist/release-notes.md
           if-no-files-found: error
           retention-days: 14
@@ -177,7 +175,7 @@ jobs:
         run: |
           set -euo pipefail
           test -s release-notes.md || { echo "::error::缺少草稿安装说明文件 release-notes.md"; exit 1; }
-          for a in x86_64 arm64; do sha256sum --check "fnos-hermes-agent_v${RELEASE_VERSION}_$a.fpk.sha256"; done
+          sha256sum --check "fnos-hermes-agent_v${RELEASE_VERSION}_all.fpk.sha256"
           python3 - <<'PY'
           import json, os, urllib.error, urllib.request
           base = 'https://api.github.com/repos/' + os.environ['GH_REPO']
@@ -207,9 +205,7 @@ jobs:
                   raise SystemExit('Existing tag does not match the tested source commit')
           PY
           gh release create "$RELEASE_TAG" \
-            "fnos-hermes-agent_v${RELEASE_VERSION}_x86_64.fpk" \
-            "fnos-hermes-agent_v${RELEASE_VERSION}_x86_64.fpk.sha256" \
-            "fnos-hermes-agent_v${RELEASE_VERSION}_arm64.fpk" \
-            "fnos-hermes-agent_v${RELEASE_VERSION}_arm64.fpk.sha256" \
-            --target "$RELEASE_COMMIT" --title "fnOS Hermes Agent $RELEASE_VERSION" \
+            "fnos-hermes-agent_v${RELEASE_VERSION}_all.fpk" \
+            "fnos-hermes-agent_v${RELEASE_VERSION}_all.fpk.sha256" \
+            --target "$RELEASE_COMMIT" --title "$RELEASE_TAG" \
             --notes-file release-notes.md --draft

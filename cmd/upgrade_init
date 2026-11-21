@@ -294,9 +294,22 @@ related_path() {
 
 # 环境值/参数可能是 --option=path 或 PATH 风格列表。关联检查只会阻塞，不授权信号。
 related_value() {
-    local value="$1" base="${2:-}" part
+    local value="$1" base="${2:-}" part root rest before after previous
     local -a parts=()
-    case "$value" in *"$APP_DIR"*|*"$TRIM_PKGHOME"*|*"$DATA_DIR"*) return 0 ;; esac
+    for root in "$APP_DIR" "$TRIM_PKGHOME" "$DATA_DIR"; do
+        rest="$value" previous=""
+        while [[ "$rest" == *"$root"* ]]; do
+            before="$previous${rest%%"$root"*}" after="${rest#*"$root"}"
+            case "${before: -1}" in
+                ''|[[:space:]]|\"|\'|'`'|'='|':'|','|';'|'('|'['|'{'|'<'|'>'|'|'|'&')
+                    case "${after:0:1}" in
+                        ''|'/'|[[:space:]]|\"|\'|'`'|':'|','|';'|')'|']'|'}'|'<'|'>'|'|'|'&') return 0 ;;
+                    esac ;;
+            esac
+            # 相邻的两次匹配仍须用原字符串的左边界。
+            previous="${root: -1}" rest="$after"
+        done
+    done
     if related_path "$value" "$base"; then return 0; fi
     IFS=: read -r -a parts <<< "$value"
     for part in "${parts[@]}"; do
@@ -458,22 +471,54 @@ quarantine_pid_files() {
     done
 }
 
+retryable_process_read() {
+    local reason="$PROC_REASON" part
+    [[ -n "$reason" ]] || return 1
+    for part in 'exe unreadable' 'cwd unreadable' 'cmdline unreadable, empty or incomplete' 'environ unreadable or incomplete'; do
+        reason="${reason//"$part"/}"
+    done
+    [[ -z "${reason//; /}" ]]
+}
+
+process_exited() (
+    process_start "$1" && exit 1
+    [[ ! -d "/proc/$1" || "$PROC_STATE" == Z || "$PROC_STATE" == X ]]
+)
+
 declare -A OBSERVED_STARTS=()
 collect_owned() {
-    local entry pid
+    local entry pid retry start uids owned
     PIDS=() STARTS=() KINDS=()
     for entry in /proc/[0-9]*; do
         pid="${entry##*/}"
         if preflight_ancestor "$pid"; then continue; fi
-        if owned_process "$pid"; then
-            if [[ -v OBSERVED_STARTS[$pid] && "${OBSERVED_STARTS[$pid]}" != "$PROC_START" ]]; then
-                fail_process "$pid" 'Owned processes still running with reused PID; refusing new identity'
+        retry=0 start="" uids=""
+        while :; do
+            owned=0
+            if owned_process "$pid"; then owned=1; fi
+            if [[ "$owned" == 0 && ( "$PROC_RELATED" == 1 || "$retry" -gt 0 ) ]] && process_exited "$pid"; then break; fi
+            if [[ "$retry" -gt 0 && ( "$PROC_START" != "$start" || "$PROC_UIDS" != "$uids" ) ]]; then
+                fail_process "$pid" 'Process identity changed during preflight retry; refusing new identity'
             fi
-            OBSERVED_STARTS[$pid]="$PROC_START"
-            PIDS+=("$pid") STARTS+=("$PROC_START") KINDS+=("$PROC_KIND")
-        elif [[ "$PROC_RELATED" == 1 ]]; then
+            if [[ "$owned" == 1 ]]; then
+                if [[ -v OBSERVED_STARTS[$pid] && "${OBSERVED_STARTS[$pid]}" != "$PROC_START" ]]; then
+                    fail_process "$pid" 'Owned processes still running with reused PID; refusing new identity'
+                fi
+                OBSERVED_STARTS[$pid]="$PROC_START"
+                PIDS+=("$pid") STARTS+=("$PROC_START") KINDS+=("$PROC_KIND")
+                break
+            fi
+            [[ "$PROC_RELATED" == 1 || "$retry" -gt 0 ]] || break
+            if [[ "$retry" -lt 2 ]] && retryable_process_read; then
+                start="$PROC_START" uids="$PROC_UIDS"
+                retry=$((retry + 1))
+                log_msg "进程 $pid 的信息暂时无法读取，1 秒后复核（$retry/2）"
+                sleep 1
+                continue
+            fi
+            hook_append_toast "检测到与 Hermes 目录相关的进程（PID $pid），但无法确认归属或读取完整信息，未自动停止。请先通过应用中心或该任务的启动方式停止它，再重试；不要删除 Hermes 数据目录。"
             fail_process "$pid" "App-related process cannot be safely stopped: $PROC_REASON"
-        fi
+        done
     done
 }
 

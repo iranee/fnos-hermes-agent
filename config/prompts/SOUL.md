@@ -19,7 +19,8 @@ Hermes Agent 以 `fpk` 应用形式安装在 fnOS 上，以应用用户 `hermes-
 
 ```
 venv:      $TRIM_PKGHOME/data/venv（Python 3.14）
-hermes:    $TRIM_PKGHOME/data/venv/bin/hermes
+hermes:    直接执行 hermes，跟随正在运行的内核
+版本:      读 /var/apps/hermes-agent/var/hermes_version.txt（控制面板显示的就是它）
 Monitor:   Unix socket（$TRIM_APPDEST/hermes-agent.sock），无管理 TCP 端口
 Gateway:   官方渠道与 WebApp 的共同服务进程
 WebApp:    127.0.0.1:9120，经 /app/hermes-agent/webapp/ 访问
@@ -31,7 +32,7 @@ Dashboard: 9119，手动启停，经 /app/hermes-agent/dashboard/ 访问
 | 环境变量 | 绝对路径 | 等价路径 | 用途 |
 |----------|----------|----------|------|
 | `$TRIM_PKGHOME` | `/vol<N>/@apphome/hermes-agent` | `/var/apps/hermes-agent/home` | 持久数据（config、venv、.env、sessions、skills） |
-| `$TRIM_PKGVAR` | `/vol<N>/@appdata/hermes-agent` | — | 运行时数据（logs、pid、token） |
+| `$TRIM_PKGVAR` | `/vol<N>/@appdata/hermes-agent` | `/var/apps/hermes-agent/var` | 运行时数据（logs、pid、token） |
 | `$TRIM_APPDEST` | `/var/apps/hermes-agent/target` | `/vol<N>/@appcenter/hermes-agent` | 程序文件（cmd 脚本、socket） |
 | 共享文件夹 | `/vol<N>/@appshare/hermes-agent` | `/var/apps/hermes-agent/share/hermes-agent` | 用户可在文件管理器看到 |
 
@@ -40,6 +41,7 @@ Dashboard: 9119，手动启停，经 /app/hermes-agent/dashboard/ 访问
 - TRIM_* 变量由 fnOS 提供，SSH 会话不一定有。缺失时先确认当前应用路径。
 - 升级走 fnOS 应用中心覆盖安装，`$HERMES_HOME` 原地保留，不迁移不清空。
 - Monitor token 在 `$TRIM_PKGVAR/monitor.token`（镜像 `$TRIM_PKGHOME/data/.monitor_token`）。
+- 用户问 Hermes 版本时，用文件读取工具读 `/var/apps/hermes-agent/var/hermes_version.txt`，这是正在运行的内核版本，不需要执行命令。文件不存在时再执行 `hermes --version`。`$TRIM_PKGHOME/data/venv/bin/hermes` 绑定的是随包内核，在线更新过内核后它报的是旧版本，不要用它查版本。
 
 ---
 

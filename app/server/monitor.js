@@ -8,6 +8,7 @@ import { spawn as spawnAsync } from "child_process";
 import { createGatewayOwnership } from "./process-ownership.js";
 import { createKernelRuntime } from "./kernel-runtime.js";
 import { createKernelVersion } from "./kernel-version.js";
+import { createPromptTemplates } from "./prompt-templates.js";
 import { createGitHubCredentials } from "./github-credentials.js";
 import { createKernelUpdateCheck } from "./kernel-update-check.js";
 import { createKernelBootstrap } from "./kernel-bootstrap.js";
@@ -835,6 +836,8 @@ kernelUpdateJob = createKernelUpdateJob({ dataDir: DATA_DIR, varDir: VAR_DIR, ru
     try { return await kernelMaintenance.resume(...args); }
     finally {
       HERMES_VERSION = "unknown";
+      // Hermes 在对话里直接读这个文件，核实不到新版本时宁可没有也不留旧值
+      try { unlinkSync(VERSION_FILE); } catch {}
       await refreshHermesVersion();
     }
   } },
@@ -942,6 +945,10 @@ function keepGatewayAlive(reason, verifyExisting = false) {
 }
 setTimeout(() => keepGatewayAlive("应用启动", true), 2500).unref();
 setInterval(() => keepGatewayAlive("定时巡检发现未运行"), 30000).unref();
+
+const promptTemplates = createPromptTemplates({ appDir: APP_DIR, dataDir: DATA_DIR, varDir: VAR_DIR, log });
+process.nextTick(() => promptTemplates.refresh());
+setInterval(() => promptTemplates.refresh(), 60000).unref();
 
 // 应用包版本更新检查器（/api/update/check 用，实时查询 GitHub，仅成功结果缓存 5 分钟、失败态不缓存）
 const appUpdateChecker = createUpdateChecker({ appDir: APP_DIR, log, cacheFile: `${VAR_DIR}/update-latest.txt`, networkProxy, credentials: githubCredentials });

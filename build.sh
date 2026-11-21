@@ -391,6 +391,12 @@ SERIAL_OUT="${VERSION##*-}"
 printf 'APP_VERSION=%s\nAPP_BUILD_DATE=%s\nAPP_BUILD_SERIAL=%s\nAPP_BUILD_TIME=%s\n' "$VERSION" "$TODAY_ISO" "$SERIAL_OUT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     > "$ROOT/config/bootstrap/app-version.env"
 [[ "$(manifest_get version)" == "$VERSION" ]] || die "manifest 版本写入失败"
+# GitHub 手动构建的版本输入框默认值只能是字面量，这里跟着写成当前版本（表单里仍可改）。
+WORKFLOW_FILE="$ROOT/.github/workflows/Build_fnos-hermes-agent.yml"
+if [[ -f "$WORKFLOW_FILE" ]] && ! grep -qxF "        default: '$VERSION'" "$WORKFLOW_FILE"; then
+    sed -i "/^      version:\$/,/^        type:/ s/^\(        default: \)'[^']*'/\1'$VERSION'/" "$WORKFLOW_FILE"
+    grep -qxF "        default: '$VERSION'" "$WORKFLOW_FILE" || die "工作流的版本默认值写入失败: $WORKFLOW_FILE"
+fi
 info "manifest 与 app-version.env 已写为 $VERSION"
 CONFIG_PIN_TEXT=$(printf 'HERMES_VERSION=%s\nHERMES_COMMIT=%s\nHERMES_TAG=%s' "$HERMES_VERSION" "$HERMES_COMMIT" "$HERMES_TAG")
 if [[ "$(cat -- "$CONFIG_PIN" 2>/dev/null || true)" != "$CONFIG_PIN_TEXT" ]]; then

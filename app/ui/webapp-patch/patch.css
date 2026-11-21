@@ -1,12 +1,12 @@
 /* fnOS 面板注入内置 Hermes WebApp 的界面补丁（由 webapp-proxy 注入，不改动 hermes-src）。
-   每条修补标注上游版本与对应结构，上游更新后逐条核对。补丁版本：9。 */
+   每条修补标注上游版本与对应结构，上游更新后逐条核对。补丁版本：11。 */
 
 /* v0.23.1 backend UpdateStatusCard：后端更新在 WebApp 中停用。隐藏原状态行与
    「立即检查 / 更新 / 查看新内容」操作区，只显示补丁写入的当前后端版本。 */
 html[data-hermes-desktop-host="browser"] [data-fnos-update-disabled] {
-  border-color: var(--border, #6b7280) !important;
-  background: var(--muted, #202329) !important;
-  color: var(--foreground, #f3f4f6) !important;
+  border-color: var(--ui-stroke-secondary, #6b7280) !important;
+  background: var(--ui-bg-card, transparent) !important;
+  color: var(--ui-text-primary, inherit) !important;
 }
 html[data-hermes-desktop-host="browser"] [data-fnos-update-disabled] > :not([data-fnos-update-view]) { display: none !important; }
 [data-fnos-update-view] p { margin-bottom: 0; }
@@ -33,27 +33,33 @@ html[data-hermes-desktop-host="browser"] [data-fnos-update-disabled] > :not([dat
     font-size: 16px;
     line-height: 1.25;
   }
+  /* 上游搜索框是 bg-transparent 且无边框，手机上给它一个看得见的输入框。 */
   html[data-hermes-desktop-host="browser"] input[data-fnos-model-search] {
     box-sizing: border-box;
     width: 100%;
     height: 44px !important;
     min-height: 44px;
     min-width: 44px;
+    padding: 0 12px !important;
+    border: 1px solid var(--ui-stroke-secondary, var(--border, #6b7280)) !important;
+    border-radius: 8px !important;
+    background: color-mix(in srgb, var(--foreground, #e9edf4) 6%, transparent) !important;
     font-size: 16px !important;
     line-height: normal !important;
     touch-action: manipulation;
   }
-  /* 手机上模型菜单适度放宽，选项不低于 40px 便于点按；面板改为不透明，避免看起来点穿到下面的输入框。 */
+  /* 手机上模型菜单适度放宽，选项不低于 40px 便于点按。面板改为不透明：主题色 --ui-bg-elevated 可能带透明度，
+     垫在不透明的 --theme-neutral-card 之上，避免看起来点穿到下面的对话区。 */
   html[data-hermes-desktop-host="browser"] [data-fnos-model-menu] {
     width: min(340px, calc(100vw - 32px)) !important;
     max-width: calc(100vw - 32px) !important;
-    background: var(--ui-bg-elevated, var(--popover, #202329)) !important;
+    background: linear-gradient(var(--ui-bg-elevated, transparent), var(--ui-bg-elevated, transparent)) var(--theme-neutral-card, var(--popover, #202329)) !important;
     border-color: var(--border, #6b7280) !important;
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
   }
   html[data-hermes-desktop-host="browser"] [data-fnos-model-menu] [data-slot="dropdown-menu-search"] {
-    background: var(--ui-bg-elevated, var(--popover, #202329));
+    background: linear-gradient(var(--ui-bg-elevated, transparent), var(--ui-bg-elevated, transparent)) var(--theme-neutral-card, var(--popover, #202329)) !important;
   }
   html[data-hermes-desktop-host="browser"] [data-fnos-model-menu] [class*="max-h-[max(150px,30dvh)]"] {
     max-height: max(200px, 40dvh) !important;
@@ -112,6 +118,32 @@ html[data-hermes-desktop-host="browser"] [data-fnos-update-disabled] > :not([dat
   html[data-hermes-desktop-host="browser"] [data-fnos-model-menu] [role="menuitem"] > button[aria-pressed][type="button"] > i.codicon {
     font-size: 17px !important;
   }
+  /* v0.23.1：复用行尾 i 的独立热区，不插入 React 未知的按钮。 */
+  @media (hover: none), (pointer: coarse) {
+    html[data-hermes-desktop-host="browser"] :is([data-fnos-model-menu], [data-fnos-model-submenu])
+      [data-slot="dropdown-menu-sub-trigger"][role="menuitem"]:has(> i.codicon-chevron-right:last-child) {
+      min-height: 44px;
+      padding-top: 0 !important;
+      padding-bottom: 0 !important;
+    }
+    html[data-hermes-desktop-host="browser"] :is([data-fnos-model-menu], [data-fnos-model-submenu])
+      [data-slot="dropdown-menu-sub-trigger"][role="menuitem"] > i.codicon-chevron-right:last-child {
+      display: inline-flex !important;
+      align-items: center;
+      justify-content: center;
+      box-sizing: border-box;
+      flex: 0 0 44px;
+      width: 44px;
+      min-width: 44px;
+      height: 44px;
+      min-height: 44px;
+      margin-block: 0;
+      margin-inline-end: -8px;
+      pointer-events: auto;
+      touch-action: manipulation;
+      cursor: pointer;
+    }
+  }
   /* 窄屏下父菜单已占满宽度，Radix 把二级菜单放在左右任一侧都会出屏，改为屏内铺满、垂直居中。 */
   html[data-hermes-desktop-host="browser"] [data-radix-popper-content-wrapper]:has(> [data-fnos-model-submenu]) {
     left: 8px !important;
@@ -123,6 +155,9 @@ html[data-hermes-desktop-host="browser"] [data-fnos-update-disabled] > :not([dat
   html[data-hermes-desktop-host="browser"] [data-fnos-model-submenu] {
     width: 100%;
     max-width: none !important;
+    background: linear-gradient(var(--ui-bg-elevated, transparent), var(--ui-bg-elevated, transparent)) var(--theme-neutral-card, var(--popover, #202329)) !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
   }
   html[data-hermes-desktop-host="browser"] [data-fnos-model-submenu] :is([role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]) {
     min-height: 44px;
@@ -139,7 +174,7 @@ html[data-hermes-desktop-host="browser"] [data-fnos-update-disabled] > :not([dat
     width: min(288px, calc(100vw - 24px)) !important;
     max-width: calc(100vw - 24px) !important;
     padding: 6px !important;
-    background: var(--ui-bg-elevated, var(--popover, #202329)) !important;
+    background: linear-gradient(var(--ui-bg-elevated, transparent), var(--ui-bg-elevated, transparent)) var(--theme-neutral-card, var(--popover, #202329)) !important;
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
   }
@@ -166,8 +201,367 @@ html[data-hermes-desktop-host="browser"] [data-fnos-update-disabled] > :not([dat
     font-size: 13px !important;
     line-height: 1.4;
   }
+  /* 修补 7：「编辑模型…」打开的 ModelVisibilityDialog（上游 max-w-xs、行 text-xs/py-1、开关 h-4 w-7），
+     手机上按模型菜单的样子处理：不透明、不模糊、搜索框 44px、模型行 44px/15px，开关和复选框放大。
+     结构（dialog-content > 内容区）：dialog-header、「搜索图标 + 输入框」行、列表、底部按钮行。 */
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] {
+    width: min(360px, calc(100vw - 24px)) !important;
+    max-width: calc(100vw - 24px) !important;
+    background: linear-gradient(var(--ui-bg-elevated, transparent), var(--ui-bg-elevated, transparent)) var(--theme-neutral-card, var(--popover, #202329)) !important;
+    border-color: var(--border, #6b7280) !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] [data-slot="dialog-title"] {
+    font-size: 16px !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] [data-slot="dialog-close-button"] {
+    top: 6px !important;
+    right: 6px !important;
+    width: 36px !important;
+    height: 36px !important;
+    touch-action: manipulation;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] [data-slot="dialog-header"] + div {
+    box-sizing: border-box;
+    min-height: 44px;
+    margin: 4px 12px 6px !important;
+    padding: 0 12px !important;
+    gap: 8px !important;
+    border: 1px solid var(--ui-stroke-secondary, var(--border, #6b7280));
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--foreground, #e9edf4) 6%, transparent);
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] [data-slot="dialog-header"] + div > svg {
+    width: 16px !important;
+    height: 16px !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] input[data-fnos-dialog-search] {
+    height: 42px !important;
+    min-width: 0;
+    font-size: 16px !important;
+    line-height: normal !important;
+    touch-action: manipulation;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] [data-slot="dialog-header"] + div + div {
+    max-height: min(55vh, calc(100dvh - 220px)) !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] label,
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] button[data-slot="row-button"] {
+    min-height: 44px;
+    padding: 6px 12px !important;
+    font-size: 15px !important;
+    line-height: 1.3 !important;
+    touch-action: manipulation;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] div:has(> button + [data-slot="checkbox"]) {
+    min-height: 40px;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] div:has(> button + [data-slot="checkbox"]) > button:not([data-slot="checkbox"]) {
+    min-height: 32px;
+    font-size: 12px !important;
+  }
+  /* 尺寸用缩放，不改上游拇指位移；点按区随之放大。 */
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] :is([data-slot="checkbox"], [data-slot="switch"]) {
+    transform: scale(1.3);
+    transform-origin: right center;
+    margin-left: 8px;
+    touch-action: manipulation;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] label > button[data-slot="button"] {
+    width: 36px !important;
+    height: 36px !important;
+    margin: -6px 0 !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] label > button[data-slot="button"] > svg {
+    width: 16px !important;
+    height: 16px !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] > div > div:last-child:has(> button) {
+    padding: 8px 12px !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] > div > div:last-child:has(> button) > button {
+    min-height: 44px;
+    font-size: 15px !important;
+    touch-action: manipulation;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-model-dialog] [data-slot="dialog-header"] + div + div > div > div:not(:has(> button)) {
+    font-size: 12px !important;
+  }
 }
 [data-fnos-model-close] { display: none; }
+
+/* v0.23.1 Select（设置模型等）：保留 Popper 定位/碰撞计算与主题，只修窄屏尺寸。
+   wrapper 的 inline min-width:max-content 与 viewport 的 trigger-width 下限会被长 ID 撑开。 */
+@media (max-width: 639.98px) {
+  html[data-hermes-desktop-host="browser"] [data-radix-popper-content-wrapper]:has(> [data-slot="select-content"]) {
+    min-width: 0 !important;
+    max-width: calc(100vw - 16px);
+  }
+  html[data-hermes-desktop-host="browser"] [data-slot="select-content"] {
+    box-sizing: border-box;
+    width: max-content;
+    min-width: min(max(9rem, var(--radix-select-trigger-width, 0px)), calc(100vw - 16px), var(--radix-select-content-available-width, 100vw));
+    max-width: min(calc(100vw - 16px), var(--radix-select-content-available-width, 100vw));
+  }
+  html[data-hermes-desktop-host="browser"] [data-slot="select-content"] [data-radix-select-viewport] {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    /* 不覆盖 Radix 的 overflow/flex/max-height，长列表仍由原 viewport 滚动。 */
+  }
+  html[data-hermes-desktop-host="browser"] [data-slot="select-content"] [data-slot="select-item"] {
+    min-width: 0;
+    min-height: 44px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  /* 首个 span 是绝对定位的 checkmark；只让最后的 ItemText 换行，保留上游 pr-7。 */
+  html[data-hermes-desktop-host="browser"] [data-slot="select-content"] [data-slot="select-item"] > span:last-child {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    overflow: visible;
+    text-overflow: clip;
+  }
+  html[data-hermes-desktop-host="browser"] [data-slot="select-trigger"] {
+    min-width: 0;
+    max-width: 100%;
+    height: auto;
+    min-height: 44px;
+    white-space: normal;
+  }
+  html[data-hermes-desktop-host="browser"] [data-slot="select-trigger"] [data-slot="select-value"] {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    overflow: visible;
+    text-overflow: clip;
+    text-align: start;
+  }
+  html[data-hermes-desktop-host="browser"] [data-slot="select-trigger"] > :is(i, svg) {
+    flex-shrink: 0;
+  }
+}
+
+@media (max-width: 900px) and (max-height: 500px) {
+  html[data-hermes-desktop-host="browser"] [data-slot="aui_intro"] {
+    display: none !important;
+  }
+}
+
+/* v0.23.1 trigger-popover.tsx：/、@、emoji 共用 listbox，候选是直接子 button，非 role=option。
+   只改尺寸；保留 data-highlighted、onPick/键盘路径、上下定位及 drawer 自身滚动。help dialog 不受影响。 */
+@media (max-width: 639.98px) {
+  html[data-hermes-desktop-host="browser"] [data-slot="aui_intro"] .wordmark.fit-text {
+    --fit-min: 1rem !important;
+  }
+  html[data-hermes-desktop-host="browser"] [data-slot="composer-completion-drawer"][role="listbox"] {
+    max-height: min(22rem, 40dvh, max(0px, calc(100dvh - 12rem)));
+  }
+  html[data-hermes-desktop-host="browser"] [data-slot="composer-completion-drawer"][role="listbox"] > button {
+    min-height: 44px;
+    font-size: 14px;
+    line-height: 20px;
+  }
+
+  /* OverlayView 顶部/底部留白不变，仅将设置卡片两侧 44px 收至 12px。 */
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings] {
+    padding-inline: 12px;
+  }
+  /* edgeBadge 半跨卡片上沿（24px 高）；按钮从其下方起排，bar 在 grid 中真实占位。
+     不改 --titlebar-height，避免连带改变卡片顶部留白或内部页面。 */
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-header],
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-bar] {
+    box-sizing: border-box;
+    height: 60px;
+    min-height: 60px;
+    flex-shrink: 0;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-bar] {
+    min-width: 0;
+    padding: 12px 60px 4px 8px;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-bar] > div:first-child {
+    flex: 1 1 0%;
+    min-width: 0;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-bar] > div:first-child > button {
+    min-width: 0;
+    max-width: 100%;
+    min-height: 44px;
+    height: auto;
+    font-size: 14px;
+    line-height: 20px;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-bar] > div:first-child > button > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-bar] > div:first-child > button > :is(i, svg) {
+    flex-shrink: 0;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-bar] > div:nth-child(2) {
+    flex: none;
+  }
+  /* 工具保留原图标，窄屏独立 32×44 热区，不能被长标题挤压。 */
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-bar] > div:nth-child(2) > button {
+    flex: none;
+    width: 32px;
+    min-width: 32px;
+    height: 44px;
+    padding: 0;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-header] > div:has(> [data-fnos-settings-close]) {
+    top: 12px;
+    right: 8px;
+    transform: none;
+    translate: none;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-close] {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    padding: 0;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-badge] {
+    width: max-content;
+    max-width: 100%;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-badge] > button {
+    white-space: nowrap;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-badge] > button > * {
+    flex-shrink: 0;
+  }
+  /* appearance-settings.tsx ListRow wide：只将主题行的标题/控件上下排，避免标题被挤成逐字换行。
+     SegmentedControl 保留原 grid、按钮、图标及配色；不影响 description/below 或其他设置行。 */
+  html[data-hermes-desktop-host="browser"] [id="setting-field-appearance.theme"] > div.grid > div.min-w-0 > div.flex:first-child {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  html[data-hermes-desktop-host="browser"] [id="setting-field-appearance.theme"] > div.grid > div.min-w-0 > div.flex:first-child > div.flex.shrink-0 {
+    width: 100%;
+    min-width: 0;
+  }
+  html[data-hermes-desktop-host="browser"] [id="setting-field-appearance.theme"] > div.grid > div.min-w-0 > div.flex:first-child > div.flex.shrink-0 > div.inline-grid {
+    width: 100%;
+    min-width: 0;
+    grid-auto-columns: minmax(0, 1fr);
+  }
+  html[data-hermes-desktop-host="browser"] [id="setting-field-appearance.theme"] > div.grid > div.min-w-0 > div.flex:first-child > div.flex.shrink-0 > div.inline-grid > button {
+    min-width: 44px;
+    min-height: 44px;
+    padding-inline: 4px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    touch-action: manipulation;
+  }
+  html[data-hermes-desktop-host="browser"] [id="setting-field-appearance.theme"] > div.grid > div.min-w-0 > div.flex:first-child > div.flex.shrink-0 > div.inline-grid > button > :is(svg, i) {
+    flex-shrink: 0;
+  }
+  /* 原 Radix 定位/碰撞策略不动；长导航名在菜单内完整换行，局部滚动仍由 Content 承担。 */
+  html[data-hermes-desktop-host="browser"] [data-radix-popper-content-wrapper]:has(> [data-fnos-settings-menu]) {
+    min-width: 0 !important;
+    max-width: calc(100vw - 16px);
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-menu] {
+    width: min(288px, calc(100vw - 24px));
+    min-width: 0;
+    max-width: min(calc(100vw - 16px), var(--radix-dropdown-menu-content-available-width, 100vw));
+    max-height: min(60dvh, var(--radix-dropdown-menu-content-available-height, 60dvh));
+    overscroll-behavior: contain;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-menu] > [data-slot="dropdown-menu-item"][role="menuitem"] {
+    min-width: 0;
+    min-height: 44px;
+    font-size: 14px;
+    line-height: 20px;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-settings-menu] > [data-slot="dropdown-menu-item"][role="menuitem"] > span {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    overflow: visible;
+    text-overflow: clip;
+  }
+}
+
+/* v0.23.1 chat/sidebar：沿用官方 260px 侧栏、图标和主题，只扩大手机常用入口。
+   顶部导航独立限高；原 sessions scroller / 空态与底部 profile-rail 不互相覆盖。 */
+@media (max-width: 639.98px) {
+  html[data-hermes-desktop-host="browser"] [data-tour="sessions-sidebar"] > [data-slot="sidebar-content"] > [data-slot="sidebar-group"] {
+    min-height: 0;
+    max-height: 50%;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  html[data-hermes-desktop-host="browser"] [data-tour="sessions-sidebar"] [data-sidebar="menu-button"] {
+    min-width: 44px;
+    min-height: 44px;
+    touch-action: manipulation;
+  }
+  /* SidebarBlankState：min-h-0 的 grid 在极短屏仍需自行滚动，不能把新建项目画到底栏上。 */
+  html[data-hermes-desktop-host="browser"] [data-tour="sessions-sidebar"] > [data-slot="sidebar-content"] > div:has(> div > p + button[data-size="sm"]) {
+    overflow: auto;
+    align-items: safe center;
+    overscroll-behavior: contain;
+  }
+  html[data-hermes-desktop-host="browser"] [data-tour="sessions-sidebar"] [data-slot="profile-rail"] > button[aria-pressed] {
+    flex: none;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    touch-action: manipulation;
+  }
+  html[data-hermes-desktop-host="browser"] [data-tour="sessions-sidebar"] [data-slot="profile-rail"] > div:has(> button[aria-haspopup="menu"]) {
+    flex: 1 1 0%;
+    min-width: 0;
+  }
+  html[data-hermes-desktop-host="browser"] [data-tour="sessions-sidebar"] [data-slot="profile-rail"] > div > button[aria-haspopup="menu"] {
+    min-width: 44px;
+    min-height: 44px;
+    max-width: 100%;
+    touch-action: manipulation;
+  }
+  /* 只关联侧栏配置菜单；不覆盖 Popper 的 top/left/transform 或官方颜色、焦点/选中态。 */
+  html[data-hermes-desktop-host="browser"] [data-radix-popper-content-wrapper]:has(> [data-fnos-profile-menu]) {
+    min-width: 0 !important;
+    max-width: calc(100vw - 16px);
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-profile-menu] {
+    box-sizing: border-box;
+    width: min(288px, calc(100vw - 16px));
+    min-width: 0;
+    max-width: min(calc(100vw - 16px), var(--radix-dropdown-menu-content-available-width, 100vw));
+    max-height: min(60dvh, var(--radix-dropdown-menu-content-available-height, 60dvh));
+    overscroll-behavior: contain;
+  }
+  html[data-hermes-desktop-host="browser"] [data-fnos-profile-menu] :is([role="menuitem"], [role="menuitemradio"]) {
+    min-width: 0;
+    min-height: 44px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    touch-action: manipulation;
+  }
+  /* 新建/导入的直接 span 与 profile 行的嵌套标签；不展开 sr-only 状态或改动勾选/头像。 */
+  html[data-hermes-desktop-host="browser"] [data-fnos-profile-menu] :is([role="menuitem"], [role="menuitemradio"]) span.truncate {
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    overflow: visible;
+    text-overflow: clip;
+  }
+}
 
 /* v0.23.1 composer 的听写/语音入口。保留正在录音时的停止控件。 */
 html[data-hermes-desktop-host="browser"]:not([data-fnos-voice-entries="available"]) [data-slot="composer-root"]
@@ -314,7 +708,153 @@ html[data-hermes-desktop-host="browser"] [data-fnos-uninstall-nav] {
   }
 }
 
+/* v0.23.2 插件操作组会换行，不能继续挤在固定 40px 高的搜索框内。 */
+@container catalog (max-width: 960px) {
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-results] {
+    overflow-y: auto;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-results] > * {
+    flex-shrink: 0;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-results] > div:last-child {
+    min-height: 240px;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-header] > div:has(> [data-catalog-actions]) {
+    display: grid;
+    grid-template-columns: 16px auto minmax(0, 1fr) auto;
+    grid-template-rows: minmax(44px, auto) auto;
+    height: auto;
+    column-gap: 8px;
+    padding-inline: 12px;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-header] input {
+    grid-column: 3;
+    grid-row: 1;
+    width: 100%;
+    min-width: 0;
+    height: 44px;
+    font-size: 16px;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-header] > div > button {
+    grid-column: 4;
+    grid-row: 1;
+    min-width: 36px;
+    min-height: 36px;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-actions] {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: stretch;
+    justify-content: flex-start;
+    gap: 4px 8px;
+    padding-block: 6px;
+    border-top: 1px solid var(--ui-stroke-tertiary);
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-actions] > :is(button, span) {
+    flex: none;
+    min-width: 36px;
+    min-height: 36px;
+    max-width: 100%;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-actions] > button {
+    padding-inline: 8px;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] .catalog-switch {
+    min-height: 36px;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] .catalog-filter-row {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] .catalog-filter-trigger {
+    margin-left: auto;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] .catalog-filter-chips {
+    order: 1;
+    flex: 1 0 100%;
+    flex-wrap: wrap;
+    gap: 6px;
+    overflow: visible;
+    padding-block: 0;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] .catalog-filter-row button {
+    min-width: 36px;
+    min-height: 36px;
+    font-size: 13px;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] .catalog-filter-chips button {
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+@container catalog (max-width: 640px) {
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-actions] {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) repeat(3, 44px);
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-actions] > button {
+    height: auto;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-actions] > button:first-child {
+    grid-column: 1 / -1;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-actions] > span:has(.catalog-switch) {
+    grid-column: 1 / 3;
+    min-width: 0;
+    white-space: normal;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-actions] > span:has(.catalog-switch) + button {
+    grid-column: 3 / -1;
+    white-space: normal;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-actions] > :is(button, span),
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] .catalog-switch,
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] .catalog-filter-row button,
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-header] > div > button {
+    min-height: 44px;
+  }
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-actions] > button,
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] .catalog-filter-trigger button,
+  html[data-hermes-desktop-host="browser"] [data-catalog="plugins"] [data-catalog-header] > div > button {
+    min-width: 44px;
+  }
+}
+
 /* 新版 Chromium 会让对话滚动区等大容器可被聚焦，新建窗口（?win=secondary）里它们先拿到焦点，默认焦点环画成整块黑色双线框 */
 :is(#root, main, [data-slot="aui_thread-viewport"], [data-slot="aui_thread-content"], [data-slot="aui_thread-root"]):is(:focus, :focus-visible) {
   outline: none !important;
+}
+
+/* 只增大手机热区，保留多行输入的自适应高度。 */
+@media (max-width: 639.98px) {
+  html[data-hermes-desktop-host="browser"] form[data-clarify-batch] [data-clarify-batch-question] {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  html[data-hermes-desktop-host="browser"] form[data-clarify-batch] [data-clarify-batch-question] :is([data-choice], textarea) {
+    min-width: 0;
+    min-height: 44px;
+    max-width: 100%;
+  }
+  html[data-hermes-desktop-host="browser"] form[data-clarify-batch] [data-clarify-batch-question] [data-choice] {
+    white-space: normal;
+  }
+  html[data-hermes-desktop-host="browser"] form[data-clarify-batch] [data-clarify-batch-question] [data-choice] > span {
+    min-width: 0;
+  }
+  html[data-hermes-desktop-host="browser"] form[data-clarify-batch] > div:last-child:has(> button[type="submit"]) {
+    flex-wrap: wrap;
+  }
+  html[data-hermes-desktop-host="browser"] form[data-clarify-batch] > div:last-child:has(> button[type="submit"]) > button {
+    min-width: 44px;
+    min-height: 44px;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
 }

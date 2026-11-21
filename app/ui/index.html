@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <base href="/app/hermes-agent/">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
   <!-- iOS Safari 专用：防止输入框被键盘遮挡 -->
   <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
@@ -180,6 +180,8 @@
     .nav-item svg{width:18px;height:18px;flex-shrink:0}
     .nav-label{font-size:13px;font-weight:500}
     .nav-item:disabled{opacity:.5;cursor:wait;background:transparent}
+    .nav-dot{position:absolute;top:9px;left:26px;width:8px;height:8px;border-radius:50%;background:var(--red);pointer-events:none}
+    .nav-dot[hidden]{display:none}
     .service-error{color:var(--red);font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;-webkit-user-select:text}
     .service-error:empty{display:none}
     .ui-notice{display:flex;align-items:flex-start;gap:8px;padding:10px 12px;margin:8px 0;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg2);color:var(--text2);font-size:12px;line-height:1.7;overflow-wrap:anywhere;white-space:pre-line}
@@ -657,6 +659,7 @@
       .nav-item.active{color:var(--blue)}
       .nav-item:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
       .nav-item svg{width:20px;height:20px}
+      .nav-dot{top:4px;left:calc(50% + 6px)}
       .webapp-facts{grid-template-columns:1fr}
       #viewSettings{overflow-wrap:anywhere}
       #viewSettings .surface-grid{grid-template-columns:1fr;gap:10px;margin-bottom:10px}
@@ -779,6 +782,7 @@
       <button class="nav-item" data-view="update" onclick="switchView('update')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         <span class="nav-label">更新</span>
+        <span class="nav-dot" id="navUpdateDot" aria-hidden="true" hidden></span>
       </button>
     </div>
     <a class="nav-item sidebar-window" id="panelOpen" href="./" target="_blank" rel="noopener noreferrer" aria-label="在新标签页打开控制面板" title="在新标签页打开控制面板"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9"/><path d="M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5"/></svg><span class="nav-label">新标签页</span></a>
@@ -1411,6 +1415,12 @@
       });
     });
   };
+  // 导航“更新”上的红点：本次打开面板内发现新 FPK 就亮，进过更新页后本次不再亮（只存内存，重新打开面板重新判断）。
+  var appUpdateDotSeen = false;
+  function setUpdateNavDot(on){
+    var dot = document.getElementById('navUpdateDot');
+    if (dot) dot.hidden = !on;
+  }
   // ─── 视图切换 ───
   window.switchView = function(view){
     // 切换视图时关闭仍打开的「添加/编辑模型」弹窗，避免手机端切到概览/更新后弹窗仍浮在页面上
@@ -1440,13 +1450,14 @@
     }
     if(view === 'models') settingsLoad();
     if(view === 'channels') channelsLoad();
+    // 首屏停在设置页时不查应用包版本，离开设置页后补读一次（有新 FPK 时点亮导航红点）。
+    if(view !== 'settings' && webappInitialized && !appVersionRequest) initVersionChip();
     if(view === 'update') {
+      appUpdateDotSeen = true;
+      setUpdateNavDot(false);
       // 更新页由隐藏转为可见后按钮才有尺寸，待本帧布局完成再校准主题滑块
       requestAnimationFrame(applyThemeMode);
-      if(webappInitialized) {
-        refreshKernelTask();
-        if(!appVersionRequest) initVersionChip();
-      }
+      if(webappInitialized) refreshKernelTask();
       // 进入更新页时自动填充当前版本
       var curEl = document.getElementById('updateCurrentVer');
       if (curEl && (curEl.textContent === '--' || curEl.textContent === '')) {
@@ -5219,6 +5230,7 @@
         throw new Error('应用包版本查询失败');
       }
       lastOnlineVersion = 'v' + d.latest.replace(/^v/i, '');
+      setUpdateNavDot(d.has_update === true && !appUpdateDotSeen);
       if (d.has_update === null) {
         // 版本号只是“月日序号”，服务端拿不到发布时间或本机构建时间时无法判断先后
         latEl.textContent = lastOnlineVersion + ' · 与本机版本不同（无法判断先后）';
@@ -5268,7 +5280,7 @@
       settingsEnsureLoaded().catch(function(){});
       // 预加载通讯平台列表，用户点进“通讯”时直接渲染缓存，不再等待加载
       channelsFetch().catch(function(){});
-      // 设置首屏不检查更新，首次进入更新页时再补读版本徽章。
+      // 设置首屏不检查更新，离开设置页时再补读版本徽章。
       if(!document.getElementById('viewSettings').classList.contains('active') && !appVersionRequest) initVersionChip();
     };
     if (window.requestIdleCallback) { requestIdleCallback(prefetchSecondary, { timeout: 2000 }); }
@@ -5321,14 +5333,14 @@
     // 增加焦点确认防止系统文件选择器等非键盘弹窗误钉高度导致返回后布局塌陷
     var handleViewportChange = function() {
       var vv = window.visualViewport;
-      var keyboardOpen = vv.height < window.innerHeight - 1;
+      var vh = vv.height * vv.scale;
+      var keyboardOpen = vh < window.innerHeight - 1;
       // 非文本输入元素持有焦点时视口缩小不代表键盘弹出（如系统文件选择器）
       if (keyboardOpen && !isTextInputFocused()) keyboardOpen = false;
       if (!keyboardOpen) {
         if (appContainer) appContainer.style.height = '';
         return;
       }
-      var vh = vv.height;
       if (appContainer) {
         appContainer.style.height = vh + 'px';
       }

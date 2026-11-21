@@ -6,7 +6,7 @@
   'use strict';
   if (window.__fnosWebappPatch) return;
 
-  const VERSION = '9';
+  const VERSION = '11';
   const TAG = '[fnos-webapp-patch]';
   const touchQuery = window.matchMedia ? window.matchMedia('(hover: none), (pointer: coarse)') : null;
   const narrowQuery = window.matchMedia ? window.matchMedia('(max-width: 639.98px)') : null;
@@ -191,9 +191,21 @@
     }
     return null;
   }
+  /* ---- 修补 7：v0.23.1 模型菜单「编辑模型…」打开的 ModelVisibilityDialog（model-visibility-dialog.tsx）----
+     dialog-content 的内容区依次是 dialog-header、「搜索图标 + 文本输入」行、模型列表。按这个结构关联，
+     不按标题文字匹配；样式在 patch.css 里按模型菜单的样子放大并改为不透明。 */
+  const MODEL_DIALOG_SEARCH = '[data-slot="dialog-content"] > div > [data-slot="dialog-header"] + div > svg + input[type="text"]';
+  function linkedModelDialog(input) {
+    if (!(input instanceof HTMLInputElement) || !input.matches(MODEL_DIALOG_SEARCH)) return null;
+    const list = input.parentElement.nextElementSibling;
+    return list instanceof HTMLDivElement ? input.closest('[data-slot="dialog-content"]') : null;
+  }
   // 浏览器宿主下打开模型菜单不自动聚焦搜索框（桌面与手机一致）。只拦挂载那一次 autoFocus：
   // 「添加自定义模型」复用同一 input 并在 setTimeout 里 focus()，挂载之后的 focus 必须放行。
-  const mobileModelInput = input => browserHost() && linkedModelMenu(input);
+  // 编辑模型弹窗只在触屏或窄屏上拦，免得一打开键盘就盖住半个列表；桌面保持上游的自动聚焦。
+  const handheld = () => Boolean((touchQuery && touchQuery.matches) || (narrowQuery && narrowQuery.matches));
+  const mobileModelInput = input => browserHost() && (linkedModelMenu(input) || (handheld() && linkedModelDialog(input)));
+  const taggedSearch = input => input.hasAttribute('data-fnos-model-search') || input.hasAttribute('data-fnos-dialog-search');
   // React commitMount 的 autoFocus 早于 MutationObserver 给 input 打标记，未打标记即挂载期。
   // 仅为精确关联 input 返回实例 guard，其他 input 的 focus 仍是原函数。
   const inputFocusDescriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'focus');
@@ -209,7 +221,7 @@
         if (!guard) {
           const input = this;
           guard = function (...args) {
-            if (this === input && !input.hasAttribute('data-fnos-model-search') && mobileModelInput(input)) return;
+            if (this === input && !taggedSearch(input) && mobileModelInput(input)) return;
             return originalInputFocus.apply(this, args);
           };
           inputFocusGuards.set(input, guard);
@@ -278,7 +290,21 @@
       });
       box.appendChild(close);
     }
+    syncModelDialogs();
     syncAttachMenus();
+  }
+  function syncModelDialogs() {
+    const dialogs = new Set();
+    for (const input of document.querySelectorAll(MODEL_DIALOG_SEARCH + ', [data-fnos-dialog-search]')) {
+      const dialog = browserHost() && linkedModelDialog(input);
+      if (dialog && !input.hasAttribute('data-fnos-dialog-search')) input.setAttribute('data-fnos-dialog-search', '');
+      else if (!dialog) input.removeAttribute('data-fnos-dialog-search');
+      if (dialog) dialogs.add(dialog);
+    }
+    for (const dialog of document.querySelectorAll('[data-fnos-model-dialog]')) {
+      if (!dialogs.has(dialog)) dialog.removeAttribute('data-fnos-model-dialog');
+    }
+    for (const dialog of dialogs) if (!dialog.hasAttribute('data-fnos-model-dialog')) dialog.setAttribute('data-fnos-model-dialog', '');
   }
   /* ---- 修补 6：v0.23.1 composer「+」附件菜单（context-menu.tsx）----
      trigger 是 composer-root 内带 codicon-add 的 ghost 按钮，Radix 给它写 aria-controls 指向菜单 id。
@@ -306,12 +332,37 @@
   // iPhone Safari 会丢掉模型菜单里单次点按的合成 click（长按仍可用），上游只给对话输入框补了 touchend 聚焦。
   // 菜单内的短点按改在 touchend 里直接激活，并取消浏览器随后的合成鼠标事件，安卓上不会重复触发。
   const MODEL_MENUS = '[data-fnos-model-menu], [data-fnos-model-submenu], [data-fnos-attach-menu]';
+  // 编辑模型弹窗的行是原生 label + Radix Switch，点按本身正常，只需要同样挡住长按弹出的外层菜单。
+  const MODEL_SURFACES = MODEL_MENUS + ', [data-fnos-model-dialog]';
+  // v0.23.1 SubTrigger 末尾是 i；不能 click 行（会选模型并关闭），复用 Radix 的方向键打开路径。
+  const MODEL_ARROW = ':is([data-fnos-model-menu], [data-fnos-model-submenu]) [data-slot="dropdown-menu-sub-trigger"][role="menuitem"] > i.codicon-chevron-right:last-child';
+  const modelMenuArrow = target => touchLayout() && narrowQuery?.matches ? target?.closest(MODEL_ARROW) : null;
+  function openModelSubmenu(arrow) {
+    const trigger = arrow.parentElement;
+    if (!trigger?.isConnected || trigger.matches(':disabled, [aria-disabled="true"], [data-disabled]') ||
+        trigger.getAttribute('aria-expanded') === 'true') return;
+    trigger.focus({ preventScroll: true });
+    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', bubbles: true, cancelable: true }));
+  }
+  let arrowTouch = null;
+  // 仅吞掉本次触摸的兼容 click（含滚动/多指/长按取消）；下一次主指针按下即重置，无延时窗口。
+  document.addEventListener('pointerdown', event => { if (event.isPrimary) arrowTouch = null; }, true);
+  document.addEventListener('click', event => {
+    const arrow = modelMenuArrow(event.target instanceof Element ? event.target : null);
+    if (!arrow) return;
+    const blocked = event.defaultPrevented || (event.detail > 0 && arrowTouch === arrow);
+    arrowTouch = null;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (!blocked) openModelSubmenu(arrow);
+  }, true);
   const TAP_MOVE_PX = 10;
   let menuTap = null;
   const tapMoved = (from, touch) => Math.hypot(touch.clientX - from.x, touch.clientY - from.y) > TAP_MOVE_PX;
   document.addEventListener('touchstart', event => {
     const touch = event.touches.length === 1 ? event.touches[0] : null;
     const target = event.target instanceof Element ? event.target : null;
+    if (touch) arrowTouch = modelMenuArrow(target);
     menuTap = touch && target?.closest(MODEL_MENUS) && touchLayout()
       ? { at: event.timeStamp, x: touch.clientX, y: touch.clientY, target } : null;
   }, { capture: true, passive: true });
@@ -337,6 +388,12 @@
     // 已聚焦的输入框交给浏览器移动光标。
     if (input && document.activeElement === input) return;
     const hit = document.elementFromPoint(touch.clientX, touch.clientY);
+    const arrow = modelMenuArrow(began.target);
+    if (arrow) {
+      event.preventDefault();
+      if (hit && arrow.contains(hit)) openModelSubmenu(arrow);
+      return;
+    }
     if (!hit || !(control.contains(hit) || (input && searchRow?.contains(hit)))) return;
     event.preventDefault();
     if (input) { input.focus(); return; }
@@ -350,7 +407,7 @@
   // 补丁脚本先于上游模块执行，同阶段先注册先触发，在这里截住；输入框保留浏览器自己的粘贴菜单。
   window.addEventListener('contextmenu', event => {
     const target = event.target instanceof Element ? event.target : null;
-    if (!touchLayout() || !target?.closest(MODEL_MENUS) || target.closest('input')) return;
+    if (!touchLayout() || !target?.closest(MODEL_SURFACES) || target.closest('input')) return;
     event.preventDefault();
     event.stopImmediatePropagation();
   }, true);
@@ -358,7 +415,7 @@
   // React 处理完按下后补发 pointercancel 清掉计时器；菜单项本身不监听 pointercancel。
   window.addEventListener('pointerdown', event => {
     const target = event.target instanceof Element ? event.target : null;
-    if (!event.isTrusted || event.pointerType === 'mouse' || !touchLayout() || !target?.closest(MODEL_MENUS)) return;
+    if (!event.isTrusted || event.pointerType === 'mouse' || !touchLayout() || !target?.closest(MODEL_SURFACES)) return;
     target.dispatchEvent(new PointerEvent('pointercancel', {
       bubbles: true, pointerId: event.pointerId, pointerType: event.pointerType, isPrimary: event.isPrimary,
     }));
@@ -534,6 +591,68 @@
     return value.slice(value.lastIndexOf('\u0001')) === '\u0001' + PALETTE_UNINSTALL;
   }
 
+  /* ---- v0.23.1 手机设置布局：只标记 OverlayView + OverlayNav 的已核实结构 ----
+     config:model 是设置特异标记，不读取本地化标题。TabDropdown portal 只凭 aria-controls 关联。
+     不插入/搬动 React 节点、不接管事件；尺寸仅由 browser + phone CSS 调整。 */
+  const SETTINGS_TAGS = ['data-fnos-settings', 'data-fnos-settings-card', 'data-fnos-settings-header',
+    'data-fnos-settings-close', 'data-fnos-settings-bar', 'data-fnos-settings-badge', 'data-fnos-settings-menu'];
+  function syncSettings() {
+    const tags = new Map(SETTINGS_TAGS.map(name => [name, new Set()]));
+    if (browserHost()) {
+      for (const surface of document.querySelectorAll('[data-overlay-surface]')) {
+        const nav = surface.querySelector(SETTINGS_NAV + ':has([data-tour="nav-config:model"])');
+        if (!nav || nav.closest('[data-overlay-surface]') !== surface) continue;
+        const card = nav.closest('[data-glass-raised]');
+        const wrapper = card?.parentElement;
+        const header = card?.firstElementChild;
+        const content = header?.nextElementSibling;
+        const bar = nav.nextElementSibling;
+        const trigger = bar?.firstElementChild?.querySelector(':scope > button[data-slot="dropdown-menu-trigger"][aria-haspopup="menu"]');
+        const close = header?.querySelector(':scope > div > button:has(i.codicon-close)');
+        if (wrapper?.parentElement !== surface || wrapper?.firstElementChild !== card ||
+            !header?.matches('div') || !content?.matches('div') || !content.contains(nav) ||
+            !bar?.matches('div') || !bar.nextElementSibling?.matches('main') || !trigger || !close) continue;
+        for (const [name, node] of [['data-fnos-settings', surface], ['data-fnos-settings-card', card],
+          ['data-fnos-settings-header', header], ['data-fnos-settings-close', close], ['data-fnos-settings-bar', bar]]) {
+          tags.get(name).add(node);
+        }
+        const badge = card.nextElementSibling;
+        if (badge?.matches('div') && badge.querySelector(':scope > button[data-glass-opaque]')) {
+          tags.get('data-fnos-settings-badge').add(badge);
+        }
+        const menu = document.getElementById(trigger.getAttribute('aria-controls') || '');
+        if (menu?.matches('[data-slot="dropdown-menu-content"][role="menu"]')) tags.get('data-fnos-settings-menu').add(menu);
+      }
+    }
+    // 复用/改名/切换宿主时撤销旧标记；不反复写属性，不产生 observer 循环。
+    for (const [name, nodes] of tags) {
+      for (const node of document.querySelectorAll('[' + name + ']')) if (!nodes.has(node)) node.removeAttribute(name);
+      for (const node of nodes) if (!node.hasAttribute(name)) node.setAttribute(name, '');
+    }
+  }
+
+  /* v0.23.1 ProfileRail 的 condensed 下拉：槽位可能被 Radix asChild/Tip 合并，
+     按侧栏 + rail 的直接子结构和 aria-controls 关联；不读翻译文字、不接管 profile 事件。 */
+  const PROFILE_TRIGGER = '[data-tour="sessions-sidebar"] [data-slot="profile-rail"] > div > button[aria-haspopup="menu"][aria-controls]';
+  function syncProfileMenus() {
+    const menus = new Set();
+    if (browserHost()) {
+      for (const trigger of document.querySelectorAll(PROFILE_TRIGGER)) {
+        const menu = document.getElementById(trigger.getAttribute('aria-controls'));
+        if (menu?.matches('[data-slot="dropdown-menu-content"][role="menu"]')) menus.add(menu);
+      }
+    }
+    for (const menu of document.querySelectorAll('[data-fnos-profile-menu]')) {
+      if (!menus.has(menu)) menu.removeAttribute('data-fnos-profile-menu');
+    }
+    for (const menu of menus) if (!menu.hasAttribute('data-fnos-profile-menu')) menu.setAttribute('data-fnos-profile-menu', '');
+  }
+  new MutationObserver(syncProfileMenus).observe(document.documentElement, {
+    subtree: true, childList: true, attributes: true,
+    attributeFilter: ['data-hermes-desktop-host', 'data-tour', 'data-slot', 'aria-haspopup', 'aria-controls', 'id', 'role'],
+  });
+  syncProfileMenus();
+
   function syncUninstallNavigation() {
     const targets = new Set();
     if (browserHost()) {
@@ -581,6 +700,7 @@
       }
     }
     redirectUninstallRoute();
+    syncSettings();
   }
 
   // main.tsx 使用 HashRouter。只替换 hash 内的目标 page。代理 base、外层 query、
@@ -641,7 +761,7 @@
   new MutationObserver(syncUninstallNavigation).observe(document.documentElement, {
     subtree: true, childList: true, characterData: true, attributes: true,
     attributeFilter: ['data-hermes-desktop-host', 'data-tour', 'data-slot', 'data-value',
-      'aria-controls', 'aria-labelledby', 'aria-disabled', 'id'],
+      'aria-controls', 'aria-labelledby', 'aria-disabled', 'id', 'data-overlay-surface', 'data-glass-raised'],
   });
   syncUninstallNavigation();
 

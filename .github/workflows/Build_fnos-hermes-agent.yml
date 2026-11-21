@@ -10,7 +10,7 @@ on:
       version:
         description: 'Application version <core>-<serial>, prefilled with the current version; edit it when the serial or the core changes'
         required: false
-        default: '0.23.2-06'
+        default: '0.23.2-08'
         type: string
 
 permissions:

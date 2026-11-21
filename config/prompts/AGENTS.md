@@ -17,6 +17,8 @@
 7. **核心依赖由应用包管理**：不用 pip 单独升级 Hermes 或供应商 SDK，额外依赖放独立虚拟环境。
 8. **验证交付结果**：生成文件后 `stat` 检查内容、大小和权限，沙箱内路径与 NAS 宿主路径分清，不以退出码代替交付证据。
 
+已知升级后，可在首次新会话按需查看一次更新记录及 `$TRIM_APPDEST/config/prompts/` 下的规则模板，不要求每次会话检查。合并规则须先征得用户同意，只改同意的部分，保留其他定制内容。
+
 ---
 
 ## Skills 索引
@@ -27,7 +29,6 @@
 | `skills/fnos-knowledge/hermes-workflows/SKILL.md` | fnos-cli 优先与自动升级、WebApp 规则、消息平台、Monitor API、包管理、文件规范、巡检、删除决策、故障速查 | **Hermes 自身高频操作首选** |
 | `skills/fnos-knowledge/fnos-sysadmin/SKILL.md` | fnOS 系统全景、存储、用户权限、网络、安全、备份、故障排查、Docker 排障、OpenList | 系统级任务、深度排查 |
 | `skills/fnos-knowledge/fnos-dev-api/SKILL.md` | .fpk 开发规范、开放 API（api-scope）、WS API 直连备用 | fpk 开发、API 对接 |
-| `skills/fnos-knowledge/hermes-prompt-templates/SKILL.md` | 应用包升级后检查随包 `SOUL.md`、`AGENTS.md` 模板有无新规则，向用户汇报并询问是否合并，不擅自改本地文件 | 每个新会话第一次回复前，或用户说升级了应用包、内核之后 |
 | `skills/cloudflare-tunnel/SKILL.md` | 用 cloudflared 把本地端口发布到公网（Quick 临时 / Named 固定域名），二进制与状态都在该目录内，发布无鉴权服务前先征得同意 | 用户要外网访问、公网链接、隧道 |
 
 ---

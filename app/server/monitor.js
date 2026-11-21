@@ -8,7 +8,6 @@ import { spawn as spawnAsync } from "child_process";
 import { createGatewayOwnership } from "./process-ownership.js";
 import { createKernelRuntime } from "./kernel-runtime.js";
 import { createKernelVersion } from "./kernel-version.js";
-import { createPromptTemplates } from "./prompt-templates.js";
 import { createGitHubCredentials } from "./github-credentials.js";
 import { createKernelUpdateCheck } from "./kernel-update-check.js";
 import { createKernelBootstrap } from "./kernel-bootstrap.js";
@@ -57,7 +56,6 @@ if (ENV_APP_DIR) {
 }
 
 APP_DIR = pathModule.resolve(APP_DIR);
-console.log(`[初始化] APP_DIR=${APP_DIR}`);
 
 // 从 manifest 动态读取应用版本号（基于包升级模式），支持多层 fallback
 function readAppVersion() {
@@ -82,7 +80,7 @@ function readAppVersion() {
       if (m) {
         const v = m[1].trim();
         if (v && v !== "unknown") {
-          log(`[版本读取] ${fp} → ${v}`);
+          log(`[版本读取] 应用包版本：${v}`);
           return v;
         }
       } else if (!firstFailedPath) {
@@ -95,7 +93,7 @@ function readAppVersion() {
   
   // 只输出一次失败的提示
   if (firstFailedPath) {
-    log(`[版本读取] 尝试了多个路径但都失败`);
+    log("[版本读取] 无法读取应用包版本");
   }
   return "unknown";
 }
@@ -272,7 +270,7 @@ try {
 let versionProbe = 0;
 function refreshHermesVersion() {
   const probe = ++versionProbe;
-  log(`[版本检测] 准备刷新缓存 (当前=${HERMES_VERSION}, 文件=${VERSION_FILE})`);
+  log(`[版本检测] 正在核实 Hermes Agent 版本（当前：${HERMES_VERSION === "unknown" ? "待确认" : HERMES_VERSION}）`);
   return kernelVersion.read({ fresh: true }).then((identity) => {
       if (probe !== versionProbe) return;
       if (!identity) {
@@ -294,7 +292,7 @@ function refreshHermesVersion() {
     });
 }
 process.nextTick(refreshHermesVersion);
-log(`[启动检测] Hermes Agent 版本: ${HERMES_VERSION}`);
+log(`[启动检测] Hermes Agent 版本：${HERMES_VERSION === "unknown" ? "待确认" : HERMES_VERSION}`);
 
 // ─── 启动令牌（写入 VAR_DIR 供本机 CLI/脚本读取）────────────────────────────
 const HERMES_TOKEN_MIRROR = `${DATA_DIR}/.monitor_token`;
@@ -945,10 +943,6 @@ function keepGatewayAlive(reason, verifyExisting = false) {
 }
 setTimeout(() => keepGatewayAlive("应用启动", true), 2500).unref();
 setInterval(() => keepGatewayAlive("定时巡检发现未运行"), 30000).unref();
-
-const promptTemplates = createPromptTemplates({ appDir: APP_DIR, dataDir: DATA_DIR, varDir: VAR_DIR, log });
-process.nextTick(() => promptTemplates.refresh());
-setInterval(() => promptTemplates.refresh(), 60000).unref();
 
 // 应用包版本更新检查器（/api/update/check 用，实时查询 GitHub，仅成功结果缓存 5 分钟、失败态不缓存）
 const appUpdateChecker = createUpdateChecker({ appDir: APP_DIR, log, cacheFile: `${VAR_DIR}/update-latest.txt`, networkProxy, credentials: githubCredentials });

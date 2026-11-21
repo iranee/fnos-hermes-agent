@@ -1415,8 +1415,6 @@
       });
     });
   };
-  // 导航“更新”上的红点：本次打开面板内发现新 FPK 就亮，进过更新页后本次不再亮（只存内存，重新打开面板重新判断）。
-  var appUpdateDotSeen = false;
   function setUpdateNavDot(on){
     var dot = document.getElementById('navUpdateDot');
     if (dot) dot.hidden = !on;
@@ -1453,8 +1451,6 @@
     // 首屏停在设置页时不查应用包版本，离开设置页后补读一次（有新 FPK 时点亮导航红点）。
     if(view !== 'settings' && webappInitialized && !appVersionRequest) initVersionChip();
     if(view === 'update') {
-      appUpdateDotSeen = true;
-      setUpdateNavDot(false);
       // 更新页由隐藏转为可见后按钮才有尺寸，待本帧布局完成再校准主题滑块
       requestAnimationFrame(applyThemeMode);
       if(webappInitialized) refreshKernelTask();
@@ -5230,7 +5226,7 @@
         throw new Error('应用包版本查询失败');
       }
       lastOnlineVersion = 'v' + d.latest.replace(/^v/i, '');
-      setUpdateNavDot(d.has_update === true && !appUpdateDotSeen);
+      if (typeof d.has_update === 'boolean') setUpdateNavDot(d.has_update);
       if (d.has_update === null) {
         // 版本号只是“月日序号”，服务端拿不到发布时间或本机构建时间时无法判断先后
         latEl.textContent = lastOnlineVersion + ' · 与本机版本不同（无法判断先后）';

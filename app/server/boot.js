@@ -38,7 +38,6 @@ if (!DATA_DIR || !isAbsolute(DATA_DIR) || !VAR_DIR || !isAbsolute(VAR_DIR)) {
   process.exit(1);
 }
 const STATIC_DIR = `${APP_DIR}/ui`;
-const BASE_PATH  = (process.env.BASE_PATH || "").replace(/\/+$/, "");
 
 const SOCKET_PATH = (process.env.MONITOR_SOCKET_PATH || "").trim();
 if (!SOCKET_PATH) {
@@ -218,7 +217,7 @@ try {
   const m = await import("./monitor.js");
   if (typeof m.startMonitor === "function") await m.startMonitor();
   mon = m;
-  bootLog(`Monitor ready — unix:${SOCKET_PATH} (base=${BASE_PATH || "/"}) | WebApp at ${BASE_PATH}/webapp/`);
+  bootLog("[启动] 管理服务已就绪");
 } catch (e) {
   loadError = e;
   bootLog(`[FATAL] monitor.js 加载失败，进入兜底模式（静态页可用，API 返回 503）: ${e?.message || e}\n${e?.stack || ""}`);

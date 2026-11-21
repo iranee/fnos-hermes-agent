@@ -8,12 +8,10 @@ on:
         required: false
         type: string
       version:
-        description: 'Application version <core>-<serial> (required when the core changes, e.g. 0.23.1-022)'
+        description: 'Application version <core>-<serial>, prefilled with the current version; edit it when the serial or the core changes'
         required: false
+        default: '0.23.2-06'
         type: string
-  push:
-    tags:
-      - 'v*'
 
 permissions:
   contents: read
